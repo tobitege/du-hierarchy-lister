@@ -1,15 +1,17 @@
 if not screenLoaded then
 screen.setRenderScript([[
 local rx, ry = getResolution()
-local fontSize = 24
+local fontSize = 20
 local font = loadFont('FiraMono-Bold', fontSize)
 local headerFontSize = 14
 local headerFont = loadFont('FiraMono-Bold', headerFontSize)
 local gap = 6
 local navWidth = 52
-local headerButtonWidth = 144
+local headerButtonWidth = 112
+local pageButtonWidth = 88
 local headerRowHeight = headerFontSize + gap * 2
 local topBarHeight = headerRowHeight + gap * 2
+local pagerBarHeight = headerRowHeight + gap * 2
 local lineHeight = fontSize + gap * 2
 local mousex, mousey = getCursor()
 
@@ -37,7 +39,7 @@ local function drawButton(text, x, y, w, h, outputValue, textFont)
     if hovered then
         if getCursorPressed() then
             setDefaultFillColor(layer, Shape_Box, 0.2, 0.6, 1, 0.85)
-            _output = outputValue
+            output = outputValue
         else
             setDefaultFillColor(layer, Shape_Box, 0.2, 0.6, 1, 0.55)
         end
@@ -62,14 +64,14 @@ end
 
 local function drawRow(text, command, rowIndex)
     local x = navWidth
-    local y = topBarHeight + rowIndex * lineHeight
+    local y = topBarHeight + pagerBarHeight + rowIndex * lineHeight
     local w = rx - navWidth * 2
     local layer = createLayer()
     local hovered = mousex >= x and mousex <= x + w and mousey >= y and mousey <= y + lineHeight
     if hovered then
         if getCursorPressed() then
             setDefaultFillColor(layer, Shape_Box, 0.2, 0.6, 1, 0.85)
-            _output = command
+            output = command
         else
             setDefaultFillColor(layer, Shape_Box, 0.2, 0.6, 1, 0.35)
         end
@@ -84,7 +86,7 @@ end
 
 local function drawStaticRow(text, rowIndex)
     local x = navWidth
-    local y = topBarHeight + rowIndex * lineHeight
+    local y = topBarHeight + pagerBarHeight + rowIndex * lineHeight
     local w = rx - navWidth * 2
     local layer = createLayer()
     setDefaultFillColor(layer, Shape_Box, 0, 0, 0, 0.12)
@@ -94,10 +96,86 @@ local function drawStaticRow(text, rowIndex)
     addText(layer, font, text, x + gap, y + gap / 2)
 end
 
+local function drawPagerBar(page, maxPage)
+    local centerWidth = 160
+    local buttonWidth = 120
+    local y = topBarHeight + gap
+    local h = headerRowHeight
+    local totalWidth = centerWidth
+    if page > 0 then
+        totalWidth = totalWidth + buttonWidth + gap
+    end
+    if page < maxPage then
+        totalWidth = totalWidth + buttonWidth + gap
+    end
+
+    local startX = math.floor((rx - totalWidth) / 2)
+    local x = startX
+    local pagerLayer = createLayer()
+    setDefaultFillColor(pagerLayer, Shape_Box, 0.05, 0.05, 0.08, 0.85)
+    addBox(pagerLayer, 0, topBarHeight, rx, pagerBarHeight)
+
+    if page > 0 then
+        drawButton("Prev", x, y, buttonWidth, h, "page:" .. (page - 1), headerFont)
+        x = x + buttonWidth + gap
+    end
+
+    local pageLayer = createLayer()
+    setDefaultFillColor(pageLayer, Shape_Box, 0.15, 0.15, 0.2, 0.45)
+    addBox(pageLayer, x, y, centerWidth, h)
+    setDefaultFillColor(pageLayer, Shape_Text, 1, 1, 1, 1)
+    drawCenteredText(pageLayer, "Page " .. tostring(page + 1) .. " / " .. tostring(maxPage + 1), x, y, centerWidth, h, headerFont)
+    x = x + centerWidth + gap
+
+    if page < maxPage then
+        drawButton("Next", x, y, buttonWidth, h, "page:" .. (page + 1), headerFont)
+    end
+end
+
+local function drawSidePagerHotzones(page, maxPage)
+    local sideWidth = navWidth
+    local topY = topBarHeight
+    local height = ry - topBarHeight
+    local layer = createLayer()
+
+    if page > 0 then
+        if mousex >= 0 and mousex <= sideWidth and mousey >= topY and mousey <= topY + height then
+            if getCursorPressed() then
+                setDefaultFillColor(layer, Shape_Box, 0.1, 0.1, 0.5, 0.35)
+                output = "page:" .. (page - 1)
+            else
+                setDefaultFillColor(layer, Shape_Box, 0.1, 0.1, 0.5, 0.18)
+            end
+        else
+            setDefaultFillColor(layer, Shape_Box, 0.1, 0.1, 0.5, 0.08)
+        end
+        addBox(layer, 0, topY, sideWidth, height)
+        setDefaultFillColor(layer, Shape_Text, 1, 1, 1, 1)
+        drawCenteredText(layer, "<", 0, topY, sideWidth, height, font)
+    end
+
+    if page < maxPage then
+        local x = rx - sideWidth
+        if mousex >= x and mousex <= rx and mousey >= topY and mousey <= topY + height then
+            if getCursorPressed() then
+                setDefaultFillColor(layer, Shape_Box, 0.1, 0.1, 0.5, 0.35)
+                output = "page:" .. (page + 1)
+            else
+                setDefaultFillColor(layer, Shape_Box, 0.1, 0.1, 0.5, 0.18)
+            end
+        else
+            setDefaultFillColor(layer, Shape_Box, 0.1, 0.1, 0.5, 0.08)
+        end
+        addBox(layer, x, topY, sideWidth, height)
+        setDefaultFillColor(layer, Shape_Text, 1, 1, 1, 1)
+        drawCenteredText(layer, ">", x, topY, sideWidth, height, font)
+    end
+end
+
 local raw = getInput() or ""
 local parts = splitInput(raw)
 local mode = parts[1] or "status"
-local _output = ""
+output = output or ""
 
 local headerLayer = createLayer()
 setDefaultFillColor(headerLayer, Shape_Box, 0.05, 0.05, 0.08, 0.85)
@@ -106,21 +184,16 @@ setDefaultFillColor(headerLayer, Shape_Text, 1, 1, 1, 1)
 
 if mode == "results" then
     local page = tonumber(parts[2]) or 0
-    local pageSize = tonumber(parts[3]) or 1
+    local pageCount = tonumber(parts[3]) or 1
     local count = tonumber(parts[4]) or 0
     local summary = parts[5] or ""
-    local maxPage = math.max(0, math.ceil(count / pageSize) - 1)
+    local maxPage = math.max(0, pageCount - 1)
+    local headerButtonsWidth = headerButtonWidth + gap
 
-    drawHeaderLine(headerLayer, clipText("Recipe Scan - " .. summary, 64), navWidth, gap, rx, headerRowHeight)
+    drawHeaderLine(headerLayer, clipText("Recipe Scan - " .. summary .. "  p" .. tostring(page + 1) .. "/" .. tostring(maxPage + 1), 56), navWidth, gap, rx - navWidth - headerButtonsWidth, headerRowHeight)
 
-    drawButton("Rescan", rx - navWidth - headerButtonWidth, gap + 2, headerButtonWidth, headerRowHeight - 4, "rescan", headerFont)
-
-    if page > 0 then
-        drawButton("<", 0, topBarHeight, navWidth, ry - topBarHeight, "page:" .. (page - 1))
-    end
-    if page < maxPage then
-        drawButton(">", rx - navWidth, topBarHeight, navWidth, ry - topBarHeight, "page:" .. (page + 1))
-    end
+    local buttonX = rx - navWidth - headerButtonWidth
+    drawButton("Rescan", buttonX, gap + 2, headerButtonWidth, headerRowHeight - 4, "rescan", headerFont)
 
     local rowIndex = 0
     for i = 6, #parts do
@@ -130,6 +203,8 @@ if mode == "results" then
             rowIndex = rowIndex + 1
         end
     end
+    drawSidePagerHotzones(page, maxPage)
+    drawPagerBar(page, maxPage)
 elseif mode == "detail" then
     local itemId = parts[2] or ""
     local page = tonumber(parts[3]) or 0
@@ -137,30 +212,34 @@ elseif mode == "detail" then
     local count = tonumber(parts[5]) or 0
     local title = parts[6] or ""
     local maxPage = math.max(0, math.ceil(count / pageSize) - 1)
+    local headerButtonsWidth = headerButtonWidth + gap + headerButtonWidth + gap
 
-    drawHeaderLine(headerLayer, clipText(title .. " (" .. itemId .. ")  p" .. tostring(page + 1) .. "/" .. tostring(maxPage + 1), 56), navWidth, gap, rx, headerRowHeight)
-
-    drawButton("Back", rx - navWidth - headerButtonWidth * 2 - gap, gap + 2, headerButtonWidth, headerRowHeight - 4, "results", headerFont)
-    drawButton("Rescan", rx - navWidth - headerButtonWidth, gap + 2, headerButtonWidth, headerRowHeight - 4, "rescan", headerFont)
-
-    if page > 0 then
-        drawButton("<", 0, topBarHeight, navWidth, ry - topBarHeight, "page:" .. (page - 1))
+    local detailTitle = title .. " (" .. itemId .. ")"
+    if maxPage > 0 then
+        detailTitle = detailTitle .. "  p" .. tostring(page + 1) .. "/" .. tostring(maxPage + 1)
     end
-    if page < maxPage then
-        drawButton(">", rx - navWidth, topBarHeight, navWidth, ry - topBarHeight, "page:" .. (page + 1))
-    end
+    drawHeaderLine(headerLayer, clipText(detailTitle, 50), navWidth, gap, rx - navWidth - headerButtonsWidth, headerRowHeight)
+
+    local buttonX = rx - navWidth - headerButtonWidth
+    drawButton("Rescan", buttonX, gap + 2, headerButtonWidth, headerRowHeight - 4, "rescan", headerFont)
+    buttonX = buttonX - gap - headerButtonWidth
+    drawButton("Back", buttonX, gap + 2, headerButtonWidth, headerRowHeight - 4, "results", headerFont)
 
     local rowIndex = 0
     for i = 7, #parts do
         drawStaticRow(parts[i], rowIndex)
         rowIndex = rowIndex + 1
     end
+    if maxPage > 0 then
+        drawSidePagerHotzones(page, maxPage)
+        drawPagerBar(page, maxPage)
+    end
 else
     local message = parts[2] or "Waiting for data"
     drawHeaderLine(headerLayer, clipText("Recipe Scan - " .. message, 64), navWidth, gap, rx, headerRowHeight)
 end
 
-setOutput(_output)
+setOutput(output)
 requestAnimationFrame(1)
 ]])
 end

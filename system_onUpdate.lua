@@ -14,7 +14,7 @@ if rawOutput and rawOutput ~= "" and rawOutput ~= lastOutput then
     end
 
     if rawOutput == "results" then
-        renderResults(0)
+        renderResults(currentResultsPage or 0)
         return
     end
 

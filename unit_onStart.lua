@@ -1,34 +1,65 @@
+SCHEMATIC_ROOT_ID = 2332967944
+CONSUMABLES_ROOT_ID = 1464163325
+PARTS_ROOT_ID = 1237953170
+DEBUG_SCHEMATIC_ID = 2479827059
+DEBUG_ONLY = false
+ENABLE_DEBUG_DUMPS = false
+SCREEN_INPUT_LIMIT = 900
+DEBUG_MARKER = "DBG20260409M"
+CACHE_KEY = "hierarchy_scan_cache_v7"
+CACHE_VERSION = 1
+MAX_PRODUCTS_TO_RESOLVE = 0
+
+core = nil
 screen = nil
 databank = nil
-for _, v in pairs(_G) do
-    if type(v) == "table" and v.isInClass then
-        if v.isInClass("ScreenUnit") then
-            screen = v
-        elseif databank == nil and v.isInClass("DataBankUnit") then
-            databank = v
+linkedIndustryElements = {}
+for slotName, slot in pairs(unit) do
+    if type(slot) == "table"
+        and type(slot.export) == "table"
+        and type(slot.getClass) == "function"
+    then
+        local elementClass = tostring(slot.getClass() or ""):lower()
+        slot.slotName = slotName
+        slot.elementClass = elementClass
+
+        if core == nil and elementClass:find("coreunit", 1, true) then
+            core = slot
+        elseif screen == nil and elementClass:find("screen", 1, true) then
+            screen = slot
+        elseif databank == nil and elementClass:find("databankunit", 1, true) then
+            databank = slot
         end
-        if screen ~= nil and databank ~= nil then
-            break
+
+        if (elementClass:find("industry", 1, true) or elementClass:find("furnace", 1, true)) and type(slot.getItemId) == "function" then
+            linkedIndustryElements[#linkedIndustryElements + 1] = slot
         end
     end
+end
+
+function displayName(item)
+    if not item then
+        return "Unknown item"
+    end
+    if item.locDisplayNameWithSize ~= nil and item.locDisplayNameWithSize ~= "" then
+        return item.locDisplayNameWithSize
+    end
+    if item.locDisplayName ~= nil and item.locDisplayName ~= "" then
+        return item.locDisplayName
+    end
+    if item.displayName ~= nil and item.displayName ~= "" then
+        return item.displayName
+    end
+    if item.name ~= nil and item.name ~= "" then
+        return item.name
+    end
+    return "Unknown item"
 end
 
 if screen == nil then
     system.print("Screen needs to be linked to programming board")
     unit.exit()
 end
-
-SCHEMATIC_ROOT_ID = 2332967944
-CONSUMABLES_ROOT_ID = 1464163325
-PARTS_ROOT_ID = 1237953170
-DEBUG_SCHEMATIC_ID = 3077761447
-DEBUG_ONLY = false
-ENABLE_DEBUG_DUMPS = false
-SCREEN_INPUT_LIMIT = 900
-DEBUG_MARKER = "DBG20260409M"
-CACHE_KEY = "hierarchy_scan_cache_v7"
-CACHE_VERSION = 7
-MAX_PRODUCTS_TO_RESOLVE = 1
 
 screenLoaded = false
 loadingCheck = math.floor(system.getUtcTime())
@@ -44,6 +75,7 @@ relevantSchematics = {}
 relevantSchematicList = {}
 schematicProductsByItemId = {}
 productRecipeDataByItemId = {}
+producerInfoById = {}
 itemByIdCache = {}
 remainingRelevantProductIds = {}
 remainingRelevantItemCount = 0
@@ -85,29 +117,22 @@ function getRecipesYielded(itemId)
     return recipes
 end
 
-function displayName(item)
-    if not item then
-        return "Unknown item"
-    end
-    if item.locDisplayNameWithSize ~= nil and item.locDisplayNameWithSize ~= "" then
-        return item.locDisplayNameWithSize
-    end
-    if item.locDisplayName ~= nil and item.locDisplayName ~= "" then
-        return item.locDisplayName
-    end
-    if item.displayName ~= nil and item.displayName ~= "" then
-        return item.displayName
-    end
-    if item.name ~= nil and item.name ~= "" then
-        return item.name
-    end
-    return "Unknown item"
-end
-
 function safeText(value)
     local text = tostring(value or "")
     text = text:gsub("[\r\n;|]", " ")
     return text
+end
+
+function clipLabel(text, maxLength)
+    text = safeText(text)
+    maxLength = tonumber(maxLength or 0) or 0
+    if maxLength <= 0 or string.len(text) <= maxLength then
+        return text
+    end
+    if maxLength <= 3 then
+        return string.sub(text, 1, maxLength)
+    end
+    return string.sub(text, 1, maxLength - 3) .. "..."
 end
 
 function sortedKeys(t)
@@ -202,12 +227,7 @@ function deserializeValue(serialized)
         return nil
     end
 
-    local ok, value = pcall(loader)
-    if not ok then
-        system.print("cache exec error: " .. tostring(value))
-        return nil
-    end
-    return value
+    return loader()
 end
 
 function walkTree(itemId, visited, callback, stopState)
@@ -492,43 +512,88 @@ function collectFlatIdRefs(idList, sourcePath)
     return refs
 end
 
-function collectProducerRefs(recipe)
-    local refs = {}
-    local seenRefs = {}
-    for _, producerId in ipairs(recipe.producers or {}) do
-        local id = tonumber(producerId or 0)
-        if id and id > 0 then
-            local producerItem = getItemYielded(id)
-            local ref = {
-                id = id,
-                name = displayName(producerItem),
-                quantity = 0,
-                sourcePath = "producers",
-                tier = producerItem and producerItem.tier or 0,
-                classId = producerItem and producerItem.classId or 0,
-            }
-            mergeRefs(refs, { ref }, seenRefs)
-        end
-        bumpYield()
+function classifyProducerBucket(producerRef)
+    local lowerName = tostring(producerRef and producerRef.name or ""):lower()
+    if lowerName:find("glass furnace", 1, true) then
+        return "Glass Furnace"
     end
-    return refs
+    if lowerName:find("chemical industry", 1, true) then
+        return "Chemical"
+    end
+    if lowerName:find("honeycomb", 1, true) then
+        return "Honeycomb"
+    end
+    return nil
+end
+
+function bucketFromOrderedList(orderedBuckets)
+    if #orderedBuckets == 0 then
+        return "Unknown"
+    end
+    if #orderedBuckets == 1 then
+        return orderedBuckets[1]
+    end
+    return "Mixed"
+end
+
+function getProducerInfo(producerId)
+    local cached = producerInfoById[producerId]
+    if cached ~= nil then
+        return cached
+    end
+
+    local producerItem = getItemYielded(producerId)
+    cached = {
+        id = producerId,
+        name = displayName(producerItem),
+        tier = producerItem and producerItem.tier or 0,
+        classId = producerItem and producerItem.classId or 0,
+    }
+    cached.bucket = classifyProducerBucket(cached)
+    producerInfoById[producerId] = cached
+    return cached
 end
 
 function buildProductRecipeData(productId, recipes)
     recipes = recipes or {}
     local producerRefs = {}
-    local seenRefs = {}
+    local seenProducerIds = {}
+    local seenBuckets = {}
+    local orderedBuckets = {}
 
     for _, recipe in ipairs(recipes) do
-        local recipeProducerRefs = collectProducerRefs(recipe)
-        mergeRefs(producerRefs, recipeProducerRefs, seenRefs)
-        bumpYield()
+        for _, rawProducerId in ipairs(recipe.producers or {}) do
+            local producerId = tonumber(rawProducerId or 0)
+            if producerId and producerId > 0 and not seenProducerIds[producerId] then
+                seenProducerIds[producerId] = true
+                local producerInfo = getProducerInfo(producerId)
+                producerRefs[#producerRefs + 1] = {
+                    id = producerInfo.id,
+                    name = producerInfo.name,
+                    quantity = 0,
+                    sourcePath = "producers",
+                    tier = producerInfo.tier,
+                    classId = producerInfo.classId,
+                }
+                if producerInfo.bucket and not seenBuckets[producerInfo.bucket] then
+                    seenBuckets[producerInfo.bucket] = true
+                    orderedBuckets[#orderedBuckets + 1] = producerInfo.bucket
+                end
+            end
+            bumpYield()
+        end
     end
 
     return {
         recipeCount = #recipes,
         producerRefs = producerRefs,
+        bucket = bucketFromOrderedList(orderedBuckets),
     }
+end
+
+function collectProducerRefs(recipe)
+    local recipeData = buildProductRecipeData(0, { recipe })
+    return recipeData.producerRefs or {}
 end
 
 function getProductRecipeData(productId, knownRecipes)
@@ -608,6 +673,18 @@ function printDumpLines(prefix, lines)
     end
 end
 
+function summarizeIdList(values)
+    local ids = {}
+    for _, rawValue in ipairs(values or {}) do
+        ids[#ids + 1] = tostring(tonumber(rawValue or 0) or rawValue)
+        bumpYield()
+    end
+    if #ids == 0 then
+        return "[]"
+    end
+    return "[" .. table.concat(ids, ", ") .. "]"
+end
+
 function appendTokenWithinLimit(tokens, token, limit)
     local nextLength = string.len(table.concat(tokens, ";"))
     if #tokens > 0 then
@@ -666,62 +743,6 @@ function dumpFirstRelevantSchematicToChat()
     dumpedSchematicId = item.id
 end
 
-function dumpDebugSchematicRecipeToChat(schematicId)
-    local item = getItemYielded(schematicId)
-    if not item then
-        system.print("[" .. DEBUG_MARKER .. "] missing schematic " .. tostring(schematicId))
-        return
-    end
-
-    local lines = {}
-    pushDumpLine(lines, string.format("%s schematic=%s (%s)", DEBUG_MARKER, displayName(item), tostring(item.id)), 24)
-    pushDumpLine(lines, string.format("schematic.products.count=%s", tostring(type(item.products) == "table" and #item.products or 0)), 24)
-
-    local recipes = getRecipesYielded(schematicId)
-    pushDumpLine(lines, "schematic.recipes.count=" .. tostring(#recipes), 24)
-
-    local productId = nil
-    if type(item.products) == "table" then
-        productId = tonumber(item.products[1] or 0)
-    end
-    if productId and productId > 0 then
-        local productItem = getItemYielded(productId)
-        pushDumpLine(lines, string.format("product.id=%s", tostring(productId)), 24)
-        pushDumpLine(lines, string.format("product.name=%s", displayName(productItem)), 24)
-        if productItem then
-            pushDumpLine(lines, string.format("product.type=%s tier=%s class=%s", tostring(productItem.type or ""), tostring(productItem.tier or ""), tostring(productItem.classId or "")), 24)
-            if type(productItem.schematics) == "table" then
-                pushDumpLine(lines, "product.schematics.count=" .. tostring(#productItem.schematics), 24)
-            end
-            if type(productItem.products) == "table" then
-                pushDumpLine(lines, "product.products.count=" .. tostring(#productItem.products), 24)
-            end
-        end
-
-        local productRecipes = getRecipesYielded(productId)
-        pushDumpLine(lines, "product.recipes.count=" .. tostring(#productRecipes), 24)
-        for recipeIndex, recipe in ipairs(productRecipes) do
-            if #lines >= 24 then
-                break
-            end
-            local scalarLines, tableLines = summarizeTopLevel(recipe)
-            pushDumpLine(lines, "product.recipe." .. tostring(recipeIndex) .. ".scalars=" .. tostring(#scalarLines), 24)
-            for i = 1, math.min(3, #scalarLines) do
-                pushDumpLine(lines, "  " .. scalarLines[i], 24)
-            end
-            for i = 1, math.min(3, #tableLines) do
-                pushDumpLine(lines, "  table " .. tableLines[i], 24)
-            end
-            bumpYield()
-        end
-    end
-
-    if #lines >= 24 then
-        pushDumpLine(lines, "... truncated ...", 25)
-    end
-    printDumpLines("[dbg]", lines)
-end
-
 function addSchematicResult(item, industryHits, productHits, industryRefs, productRefs)
     local scalarLines, tableLines = summarizeTopLevel(item)
 
@@ -762,8 +783,10 @@ function addResolvedProductResult(itemId)
     end
 
     local productRecipeData = getProductRecipeData(itemId)
+    local productBucket = productRecipeData.bucket or "Unknown"
 
     local itemIndustryHits = {}
+    itemIndustryHits[#itemIndustryHits + 1] = "industryBucket=" .. tostring(productBucket)
     for _, producerRef in ipairs(productRecipeData.producerRefs or {}) do
         itemIndustryHits[#itemIndustryHits + 1] = string.format(
             "recipe.producer=%s (%s) tier=%s",
@@ -780,7 +803,7 @@ function addResolvedProductResult(itemId)
     local entry = {
         id = item.id,
         name = displayName(item),
-        branch = "Products",
+        branch = productBucket,
         itemType = item.type or "",
         tier = item.tier or "",
         size = item.size or "",
@@ -860,6 +883,7 @@ function collectRelevantSchematics()
     relevantSchematicList = {}
     schematicProductsByItemId = {}
     productRecipeDataByItemId = {}
+    producerInfoById = {}
     remainingRelevantProductIds = {}
     remainingRelevantItemCount = 0
     firstRelevantSchematicId = nil
@@ -873,39 +897,15 @@ function collectRelevantSchematics()
         rootChildIds = rootItem.childIds
     end
 
-    system.print(string.format(
-        "[%s] schem-scan start root=%s children=%d",
-        DEBUG_MARKER,
-        tostring(SCHEMATIC_ROOT_ID),
-        #rootChildIds
-    ))
-
     for childIndex, childId in ipairs(rootChildIds) do
         local item = getItemYielded(childId)
         visitedNodeCount = visitedNodeCount + 1
-        if visitedNodeCount == 1 or visitedNodeCount % 10 == 0 or childIndex == #rootChildIds then
-            system.print(string.format(
-                "[%s] schem-scan child=%d/%d matched=%d uniqueProducts=%d",
-                DEBUG_MARKER,
-                childIndex,
-                #rootChildIds,
-                matchedSchematicCount,
-                uniqueProductCount
-            ))
-        end
 
         if item and item.id ~= nil and item.id > 0 then
             local name = displayName(item)
             if hasRelevantSchematicName(name) then
                 matchedSchematicCount = matchedSchematicCount + 1
                 local productRefs = collectFlatIdRefs(item.products or {}, "item.products")
-                system.print(string.format(
-                    "[%s] schem-match %d name=%s products=%d",
-                    DEBUG_MARKER,
-                    matchedSchematicCount,
-                    name,
-                    #productRefs
-                ))
 
                 relevantSchematics[item.id] = {
                     id = item.id,
@@ -947,14 +947,6 @@ function collectRelevantSchematics()
         remainingRelevantItemCount = remainingRelevantItemCount + 1
         bumpYield()
     end
-
-    system.print(string.format(
-        "[%s] schem-scan done nodes=%d matched=%d uniqueProducts=%d",
-        DEBUG_MARKER,
-        visitedNodeCount,
-        matchedSchematicCount,
-        uniqueProductCount
-    ))
 end
 
 function summarizeProducts(recipe)
@@ -1110,15 +1102,45 @@ function renderStatus(message)
     screen.setScriptInput("status;" .. safeText(scanSummary))
 end
 
+function getEntrySourceCount(entry)
+    local sourceCount = tonumber(entry and entry.sourceCount or 0) or 0
+    if sourceCount > 0 then
+        return sourceCount
+    end
+    return #((entry and entry.sourceSchematics) or {})
+end
+
+function buildResultListLabel(entry)
+    return string.format(
+        "%s [%s]",
+        clipLabel(entry.name or "Unknown item", 48),
+        tostring(entry.branch or "Unknown")
+    )
+end
+
+function buildResultPageStarts()
+    local starts = {}
+    local count = #scanResults
+    if count <= 0 then
+        return { 1 }
+    end
+
+    local startIndex = 1
+    while startIndex <= count do
+        starts[#starts + 1] = startIndex
+        startIndex = startIndex + RESULTS_PER_PAGE
+    end
+
+    return starts
+end
+
 function renderResults(page)
     currentView = "results"
     currentResultsPage = math.max(0, tonumber(page) or 0)
 
     local count = #scanResults
-    local maxPage = 0
-    if count > 0 then
-        maxPage = math.max(0, math.ceil(count / RESULTS_PER_PAGE) - 1)
-    end
+    local pageStarts = buildResultPageStarts()
+    local maxPage = math.max(0, #pageStarts - 1)
     if currentResultsPage > maxPage then
         currentResultsPage = maxPage
     end
@@ -1126,23 +1148,19 @@ function renderResults(page)
     local tokens = {
         "results",
         tostring(currentResultsPage),
-        tostring(RESULTS_PER_PAGE),
+        tostring(maxPage + 1),
         tostring(count),
         safeText(scanSummary),
     }
 
-    local startIndex = currentResultsPage * RESULTS_PER_PAGE + 1
-    local endIndex = math.min(startIndex + RESULTS_PER_PAGE - 1, count)
+    local startIndex = pageStarts[currentResultsPage + 1] or 1
+    local endIndex = count
+    if currentResultsPage < maxPage then
+        endIndex = (pageStarts[currentResultsPage + 2] or (count + 1)) - 1
+    end
     for index = startIndex, endIndex do
         local entry = scanResults[index]
-        local label = string.format(
-            "%s [%s] recipes=%d matched=%d sources=%d",
-            entry.name,
-            entry.branch,
-            entry.recipeCount,
-            entry.matchedRecipeCount,
-            #(entry.sourceSchematics or {})
-        )
+        local label = buildResultListLabel(entry)
         if not appendTokenWithinLimit(tokens, safeText(label) .. "|" .. tostring(entry.id), SCREEN_INPUT_LIMIT) then
             break
         end
@@ -1151,39 +1169,70 @@ function renderResults(page)
     screen.setScriptInput(table.concat(tokens, ";"))
 end
 
+function joinProducerNames(producerRefs)
+    local names = {}
+    for _, producerRef in ipairs(producerRefs or {}) do
+        local suffix = ""
+        if producerRef.tier ~= nil and producerRef.tier ~= "" then
+            suffix = " T" .. tostring(producerRef.tier)
+        end
+        names[#names + 1] = tostring(producerRef.name or producerRef.id or "?") .. suffix
+    end
+    if #names == 0 then
+        return "none"
+    end
+    return table.concat(names, ", ")
+end
+
+function ensureEntryDetailData(entry)
+    if not entry or tonumber(entry.recipeCount or 0) <= 0 then
+        return
+    end
+    if #(entry.matches or {}) > 0 and #(entry.itemIndustryRefs or {}) > 0 then
+        return
+    end
+
+    local recipes = getRecipesYielded(entry.id)
+    local productRecipeData = getProductRecipeData(entry.id, recipes)
+    entry.recipeCount = #recipes
+    entry.itemIndustryRefs = productRecipeData.producerRefs or {}
+
+    local itemIndustryHits = {
+        "industryBucket=" .. tostring(productRecipeData.bucket or entry.branch or "Unknown"),
+    }
+    for _, producerRef in ipairs(productRecipeData.producerRefs or {}) do
+        itemIndustryHits[#itemIndustryHits + 1] = string.format(
+            "recipe.producer=%s (%s) tier=%s",
+            tostring(producerRef.name),
+            tostring(producerRef.id),
+            tostring(producerRef.tier or "")
+        )
+    end
+    entry.itemIndustryHits = itemIndustryHits
+
+    local matches = {}
+    for recipeIndex, recipe in ipairs(recipes) do
+        local matchDetail = collectRecipeMatchDetails(recipe, recipeIndex)
+        if matchDetail then
+            matches[#matches + 1] = matchDetail
+        end
+        bumpYield()
+    end
+    entry.matches = matches
+    entry.matchedRecipeCount = #matches
+end
+
 function buildDetailLines(entry)
+    ensureEntryDetailData(entry)
+
     local lines = {}
     appendLine(lines, string.format("Branch: %s", entry.branch))
     appendLine(lines, string.format("Item ID: %s", tostring(entry.id)))
     appendLine(lines, string.format("Type: %s", tostring(entry.itemType)))
     appendLine(lines, string.format("Tier: %s", tostring(entry.tier)))
-    appendLine(lines, string.format("Size: %s", tostring(entry.size)))
-    appendLine(lines, string.format("displayClassId: %s", tostring(entry.displayClassId)))
-    appendLine(lines, string.format("childCount: %s", tostring(entry.childCount)))
-    appendLine(lines, string.format("recipeCount: %d", entry.recipeCount))
-    appendLine(lines, string.format("matchedRecipeCount: %d", entry.matchedRecipeCount))
+    appendLine(lines, string.format("Matched recipes: %d", tonumber(entry.matchedRecipeCount or 0) or 0))
+    appendLine(lines, "Producers: " .. joinProducerNames(entry.itemIndustryRefs or {}))
 
-    for _, line in ipairs(entry.itemScalarLines or {}) do
-        appendLine(lines, "item " .. line)
-    end
-    for _, line in ipairs(entry.itemTableLines or {}) do
-        appendLine(lines, "item table " .. line)
-    end
-    for _, line in ipairs(entry.itemIndustryHits or {}) do
-        appendLine(lines, "item industry " .. line)
-    end
-    for _, line in ipairs(entry.itemProductHits or {}) do
-        appendLine(lines, "item product " .. line)
-    end
-    for _, line in ipairs(entry.itemSchematicHits or {}) do
-        appendLine(lines, "item schematic " .. line)
-    end
-    for _, line in ipairs(summarizeRefs("item industry unit", entry.itemIndustryRefs or {})) do
-        appendLine(lines, line)
-    end
-    for _, line in ipairs(summarizeRefs("item product ref", entry.itemProductRefs or {})) do
-        appendLine(lines, line)
-    end
     for _, source in ipairs(entry.sourceSchematics or {}) do
         appendLine(lines, string.format(
             "source schematic: %s (%s) x%s",
@@ -1192,18 +1241,13 @@ function buildDetailLines(entry)
             tostring(source.quantity or 0)
         ))
     end
+    if #(entry.sourceSchematics or {}) == 0 and tonumber(entry.sourceCount or 0) > 0 then
+        appendLine(lines, string.format("source schematics: %d cached", tonumber(entry.sourceCount or 0) or 0))
+    end
 
     for _, match in ipairs(entry.matches or {}) do
         appendLine(lines, string.format("Recipe %d", match.index))
-        for _, line in ipairs(match.scalarLines or {}) do
-            appendLine(lines, "  " .. line)
-        end
-        for _, line in ipairs(match.tableLines or {}) do
-            appendLine(lines, "  table " .. line)
-        end
-        for _, line in ipairs(match.industryHits or {}) do
-            appendLine(lines, "  industry " .. line)
-        end
+        appendLine(lines, "  Producers: " .. joinProducerNames(match.producerRefs or {}))
         for _, schematic in ipairs(match.schematicMatches or {}) do
             appendLine(lines, string.format("  schematic %s (%s) x%s", schematic.name, tostring(schematic.id), tostring(schematic.quantity)))
         end
@@ -1278,6 +1322,38 @@ function sortScanResults()
     end)
 end
 
+function buildBucketSummary()
+    local counts = {
+        ["Honeycomb"] = 0,
+        ["Chemical"] = 0,
+        ["Glass Furnace"] = 0,
+        ["Mixed"] = 0,
+        ["Unknown"] = 0,
+    }
+
+    for _, entry in ipairs(scanResults or {}) do
+        local branch = tostring(entry.branch or "")
+        if counts[branch] == nil then
+            counts[branch] = 0
+        end
+        counts[branch] = counts[branch] + 1
+        bumpYield()
+    end
+
+    local parts = {}
+    for _, branch in ipairs({ "Honeycomb", "Chemical", "Glass Furnace" }) do
+        parts[#parts + 1] = branch .. "=" .. tostring(counts[branch] or 0)
+    end
+    if (counts["Mixed"] or 0) > 0 then
+        parts[#parts + 1] = "Mixed=" .. tostring(counts["Mixed"])
+    end
+    if (counts["Unknown"] or 0) > 0 then
+        parts[#parts + 1] = "Unknown=" .. tostring(counts["Unknown"])
+    end
+
+    return table.concat(parts, " ")
+end
+
 function makeCachedMatch(match)
     return {
         index = match.index,
@@ -1290,12 +1366,6 @@ function makeCachedMatch(match)
 end
 
 function makeCachedEntry(entry)
-    local matches = {}
-    for _, match in ipairs(entry.matches or {}) do
-        matches[#matches + 1] = makeCachedMatch(match)
-        bumpYield()
-    end
-
     return {
         id = entry.id,
         name = entry.name,
@@ -1304,42 +1374,134 @@ function makeCachedEntry(entry)
         tier = entry.tier,
         size = entry.size,
         displayClassId = entry.displayClassId,
-        childCount = entry.childCount,
+        childCount = 0,
         recipeCount = entry.recipeCount,
         matchedRecipeCount = entry.matchedRecipeCount,
-        itemIndustryHits = entry.itemIndustryHits or {},
-        itemProductHits = entry.itemProductHits or {},
-        itemSchematicHits = entry.itemSchematicHits or {},
-        itemIndustryRefs = entry.itemIndustryRefs or {},
-        itemProductRefs = entry.itemProductRefs or {},
-        sourceSchematics = entry.sourceSchematics or {},
-        matches = matches,
+        sourceCount = getEntrySourceCount(entry),
+        itemIndustryHits = {},
+        itemProductHits = {},
+        itemSchematicHits = {},
+        itemIndustryRefs = {},
+        itemProductRefs = {},
+        sourceSchematics = {},
+        matches = {},
     }
 end
 
-function buildCachePayload()
-    local results = {}
-    for _, entry in ipairs(scanResults) do
-        results[#results + 1] = makeCachedEntry(entry)
-        bumpYield()
-    end
+function sanitizeCacheField(value)
+    local text = tostring(value or "")
+    text = text:gsub("[\r\n|]", " ")
+    return text
+end
 
-    local schematics = {}
-    for _, info in ipairs(relevantSchematicList) do
-        schematics[#schematics + 1] = {
-            id = info.id,
-            name = info.name,
-        }
-        bumpYield()
+function makeCompactCachedLine(entry)
+    local fields = {
+        tostring(entry.id or 0),
+        sanitizeCacheField(entry.name),
+        sanitizeCacheField(entry.branch),
+        sanitizeCacheField(entry.itemType),
+        sanitizeCacheField(entry.tier),
+        sanitizeCacheField(entry.size),
+        tostring(entry.displayClassId or 0),
+        tostring(entry.recipeCount or 0),
+        tostring(entry.matchedRecipeCount or 0),
+        tostring(getEntrySourceCount(entry)),
+    }
+    return table.concat(fields, "|")
+end
+
+function splitCacheLine(line)
+    local fields = {}
+    local startIndex = 1
+    while true do
+        local separatorIndex = string.find(line, "|", startIndex, true)
+        if separatorIndex == nil then
+            fields[#fields + 1] = string.sub(line, startIndex)
+            break
+        end
+        fields[#fields + 1] = string.sub(line, startIndex, separatorIndex - 1)
+        startIndex = separatorIndex + 1
+    end
+    return fields
+end
+
+function parseCompactCachedLine(line)
+    local fields = splitCacheLine(tostring(line or ""))
+    local entryId = tonumber(fields[1] or 0)
+    if not entryId or entryId <= 0 then
+        return nil
     end
 
     return {
+        id = entryId,
+        name = fields[2] or "",
+        branch = fields[3] or "Unknown",
+        itemType = fields[4] or "",
+        tier = fields[5] or "",
+        size = fields[6] or "",
+        displayClassId = tonumber(fields[7] or 0) or 0,
+        childCount = 0,
+        recipeCount = tonumber(fields[8] or 0) or 0,
+        matchedRecipeCount = tonumber(fields[9] or 0) or 0,
+        sourceCount = tonumber(fields[10] or 0) or 0,
+        itemIndustryHits = {},
+        itemProductHits = {},
+        itemSchematicHits = {},
+        itemIndustryRefs = {},
+        itemProductRefs = {},
+        sourceSchematics = {},
+        matches = {},
+    }
+end
+
+function getCacheMetaKey()
+    return CACHE_KEY .. ":meta"
+end
+
+function getCacheChunkKey(index)
+    return CACHE_KEY .. ":chunk:" .. tostring(index)
+end
+
+function buildCompactCachePayload(maxChunkLength)
+    local chunkLimit = tonumber(maxChunkLength or 12000) or 12000
+    local chunks = {}
+    local currentChunkLines = {}
+    local currentChunkLength = 0
+
+    for _, entry in ipairs(scanResults) do
+        local line = makeCompactCachedLine(makeCachedEntry(entry))
+        local extraLength = #line
+        if currentChunkLength > 0 then
+            extraLength = extraLength + 1
+        end
+
+        if currentChunkLength > 0 and currentChunkLength + extraLength > chunkLimit then
+            chunks[#chunks + 1] = table.concat(currentChunkLines, "\n")
+            currentChunkLines = {}
+            currentChunkLength = 0
+        end
+
+        currentChunkLines[#currentChunkLines + 1] = line
+        currentChunkLength = currentChunkLength + #line
+        if #currentChunkLines > 1 then
+            currentChunkLength = currentChunkLength + 1
+        end
+        bumpYield()
+    end
+
+    if #currentChunkLines > 0 then
+        chunks[#chunks + 1] = table.concat(currentChunkLines, "\n")
+    end
+
+    return {
+        format = "compact_v1",
         version = CACHE_VERSION,
         generatedAt = system.getUtcTime(),
         scanSummary = scanSummary,
-        results = results,
-        schematics = schematics,
-    }
+        schematicCount = #relevantSchematicList,
+        resultCount = #scanResults,
+        chunkCount = #chunks,
+    }, chunks
 end
 
 function restoreCachePayload(payload)
@@ -1347,25 +1509,21 @@ function restoreCachePayload(payload)
         return false
     end
 
-    scanResults = payload.results or {}
+    scanResults = {}
     resultByItemId = {}
-    for _, entry in ipairs(scanResults) do
-        resultByItemId[tonumber(entry.id or 0)] = entry
+    for _, entry in ipairs(payload.results or {}) do
+        local cachedEntry = makeCachedEntry(entry)
+        scanResults[#scanResults + 1] = cachedEntry
+        resultByItemId[tonumber(cachedEntry.id or 0)] = cachedEntry
         bumpYield()
     end
 
-    relevantSchematicList = payload.schematics or {}
+    relevantSchematicList = {}
     relevantSchematics = {}
-    for _, info in ipairs(relevantSchematicList) do
-        if info.id then
-            relevantSchematics[info.id] = info
-        end
-        bumpYield()
-    end
 
     scanSummary = tostring(payload.scanSummary or "")
     if scanSummary == "" then
-        scanSummary = string.format("schematics=%d products=%d", #relevantSchematicList, #scanResults)
+        scanSummary = string.format("schematics=%d products=%d", tonumber(payload.schematicCount or 0) or 0, #scanResults)
     end
     scanSummary = scanSummary .. " [cached]"
     selectedItemId = nil
@@ -1382,13 +1540,13 @@ function saveCacheToDatabank()
         return false
     end
 
-    local serialized = "return " .. serializeValue(buildCachePayload())
-    if #serialized > 30000 then
-        system.print("cache too large: " .. tostring(#serialized) .. " bytes")
-        return false
+    local meta, chunks = buildCompactCachePayload(12000)
+    databank.setStringValue(getCacheMetaKey(), "return " .. serializeValue(meta))
+    for index, chunk in ipairs(chunks or {}) do
+        databank.setStringValue(getCacheChunkKey(index), chunk)
+        bumpYield()
     end
-
-    databank.setStringValue(CACHE_KEY, serialized)
+    system.print(string.format("cache saved: chunks=%d results=%d", #chunks, #scanResults))
     return true
 end
 
@@ -1398,6 +1556,35 @@ function loadCacheFromDatabank()
     end
     if not hasDatabank() then
         return false
+    end
+
+    local meta = deserializeValue(databank.getStringValue(getCacheMetaKey()))
+    if type(meta) == "table" and tostring(meta.format or "") == "compact_v1" and tonumber(meta.version or 0) == CACHE_VERSION then
+        scanResults = {}
+        resultByItemId = {}
+        for index = 1, tonumber(meta.chunkCount or 0) or 0 do
+            local chunk = databank.getStringValue(getCacheChunkKey(index))
+            for line in tostring(chunk or ""):gmatch("[^\n]+") do
+                local entry = parseCompactCachedLine(line)
+                if entry then
+                    scanResults[#scanResults + 1] = entry
+                    resultByItemId[entry.id] = entry
+                end
+                bumpYield()
+            end
+        end
+
+        relevantSchematicList = {}
+        relevantSchematics = {}
+        scanSummary = tostring(meta.scanSummary or "")
+        if scanSummary == "" then
+            scanSummary = string.format("schematics=%d products=%d", tonumber(meta.schematicCount or 0) or 0, #scanResults)
+        end
+        scanSummary = scanSummary .. " [cached]"
+        selectedItemId = nil
+        currentResultsPage = 0
+        currentDetailPage = 0
+        return true
     end
 
     local serialized = databank.getStringValue(CACHE_KEY)
@@ -1410,7 +1597,6 @@ function loadCacheFromDatabank()
 end
 
 function _scanCoroutine()
-    system.print("[" .. DEBUG_MARKER .. "] start debugOnly=" .. tostring(DEBUG_ONLY))
     scanResults = {}
     resultByItemId = {}
     relevantSchematics = {}
@@ -1425,8 +1611,6 @@ function _scanCoroutine()
     if ENABLE_DEBUG_DUMPS then
         renderStatus("Dump first schematic")
         dumpFirstRelevantSchematicToChat()
-        renderStatus("Dump debug schematic")
-        dumpDebugSchematicRecipeToChat(DEBUG_SCHEMATIC_ID)
     end
 
     if DEBUG_ONLY then
@@ -1443,19 +1627,22 @@ function _scanCoroutine()
 
     if tonumber(MAX_PRODUCTS_TO_RESOLVE or 0) > 0 then
         scanSummary = string.format(
-            "schematics=%d products=%d testLimit=%d",
+            "schematics=%d products=%d testLimit=%d %s",
             #relevantSchematicList,
             #scanResults,
-            tonumber(MAX_PRODUCTS_TO_RESOLVE or 0)
+            tonumber(MAX_PRODUCTS_TO_RESOLVE or 0),
+            buildBucketSummary()
         )
     else
         scanSummary = string.format(
-            "schematics=%d products=%d",
+            "schematics=%d products=%d %s",
             #relevantSchematicList,
-            #scanResults
+            #scanResults,
+            buildBucketSummary()
         )
     end
     system.print(scanSummary)
+    renderStatus("Save cache")
     saveCacheToDatabank()
     renderResults(0)
 end
