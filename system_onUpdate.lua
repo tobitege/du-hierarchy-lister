@@ -13,6 +13,15 @@ if rawOutput and rawOutput ~= "" and rawOutput ~= lastOutput then
         return
     end
 
+    if rawOutput == "stop" then
+        stopRequested = true
+        _loadCo = nil
+        _loadArgs = {}
+        unit.stopTimer("coTick")
+        renderIdle("Stopped")
+        return
+    end
+
     if rawOutput == "results" then
         renderResults(currentResultsPage or 0)
         return

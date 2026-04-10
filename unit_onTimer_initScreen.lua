@@ -33,18 +33,59 @@ local function drawHeaderLine(layer, text, x, y, w, h)
     addText(layer, headerFont, text, x, y + h / 2)
 end
 
-local function drawButton(text, x, y, w, h, outputValue, textFont)
+local function drawStatusView(message, current, total)
+    local centerY = math.floor(ry * 0.5)
+    local barWidth = math.floor(rx * 0.72)
+    local barHeight = 28
+    local barX = math.floor((rx - barWidth) / 2)
+    local barY = centerY + 18
+    local pct = 0
+    if total > 0 then
+        pct = math.max(0, math.min(1, current / total))
+    end
+
+    local titleLayer = createLayer()
+    setDefaultFillColor(titleLayer, Shape_Text, 1, 1, 1, 1)
+    drawCenteredText(titleLayer, "Recipe Scan", 0, centerY - 70, rx, 36, font)
+    drawCenteredText(titleLayer, tostring(message or "Working"), 0, centerY - 28, rx, 32, font)
+
+    local barLayer = createLayer()
+    setDefaultFillColor(barLayer, Shape_Box, 0.12, 0.12, 0.18, 0.9)
+    addBox(barLayer, barX, barY, barWidth, barHeight)
+    if pct > 0 then
+        setDefaultFillColor(barLayer, Shape_Box, 0.2, 0.6, 1, 0.95)
+        addBox(barLayer, barX, barY, math.max(6, math.floor(barWidth * pct)), barHeight)
+    end
+
+    local infoLayer = createLayer()
+    setDefaultFillColor(infoLayer, Shape_Text, 1, 1, 1, 1)
+    if total > 0 then
+        drawCenteredText(infoLayer, tostring(current) .. " / " .. tostring(total), 0, barY + barHeight + 12, rx, 28, headerFont)
+    else
+        drawCenteredText(infoLayer, "Please wait", 0, barY + barHeight + 12, rx, 28, headerFont)
+    end
+end
+
+local function drawButton(text, x, y, w, h, outputValue, textFont, variant)
     local layer = createLayer()
     local hovered = mousex >= x and mousex <= x + w and mousey >= y and mousey <= y + h
+    local baseR, baseG, baseB, baseA = 0.15, 0.15, 0.2, 0.45
+    local hoverR, hoverG, hoverB, hoverA = 0.2, 0.6, 1, 0.55
+    local pressR, pressG, pressB, pressA = 0.2, 0.6, 1, 0.85
+    if variant == "danger" then
+        baseR, baseG, baseB, baseA = 0.55, 0.1, 0.1, 0.72
+        hoverR, hoverG, hoverB, hoverA = 0.8, 0.16, 0.16, 0.8
+        pressR, pressG, pressB, pressA = 0.95, 0.2, 0.2, 0.92
+    end
     if hovered then
         if getCursorPressed() then
-            setDefaultFillColor(layer, Shape_Box, 0.2, 0.6, 1, 0.85)
+            setDefaultFillColor(layer, Shape_Box, pressR, pressG, pressB, pressA)
             output = outputValue
         else
-            setDefaultFillColor(layer, Shape_Box, 0.2, 0.6, 1, 0.55)
+            setDefaultFillColor(layer, Shape_Box, hoverR, hoverG, hoverB, hoverA)
         end
     else
-        setDefaultFillColor(layer, Shape_Box, 0.15, 0.15, 0.2, 0.45)
+        setDefaultFillColor(layer, Shape_Box, baseR, baseG, baseB, baseA)
     end
     addBox(layer, x, y, w, h)
     setDefaultFillColor(layer, Shape_Text, 1, 1, 1, 1)
@@ -175,7 +216,12 @@ end
 local raw = getInput() or ""
 local parts = splitInput(raw)
 local mode = parts[1] or "status"
+lastInput = lastInput or ""
 output = output or ""
+if raw ~= lastInput then
+    output = ""
+    lastInput = raw
+end
 
 local headerLayer = createLayer()
 setDefaultFillColor(headerLayer, Shape_Box, 0.05, 0.05, 0.08, 0.85)
@@ -236,7 +282,17 @@ elseif mode == "detail" then
     end
 else
     local message = parts[2] or "Waiting for data"
-    drawHeaderLine(headerLayer, clipText("Recipe Scan - " .. message, 64), navWidth, gap, rx, headerRowHeight)
+    local current = tonumber(parts[3]) or 0
+    local total = tonumber(parts[4]) or 0
+    if mode == "idle" then
+        drawHeaderLine(headerLayer, clipText("Recipe Scan - " .. message, 64), navWidth, gap, rx, headerRowHeight)
+        drawStatusView(message, 0, 0)
+        drawButton("Rescan", math.floor((rx - 160) / 2), math.floor(ry * 0.5) + 78 + lineHeight, 160, headerRowHeight + 6, "rescan", headerFont)
+    else
+        drawHeaderLine(headerLayer, clipText("Recipe Scan - " .. message, 64), navWidth, gap, rx, headerRowHeight)
+        drawStatusView(message, current, total)
+        drawButton("Stop", math.floor((rx - 140) / 2), math.floor(ry * 0.5) + 78 + lineHeight, 140, headerRowHeight + 6, "stop", headerFont, "danger")
+    end
 end
 
 setOutput(output)
@@ -245,4 +301,5 @@ requestAnimationFrame(1)
 end
 
 unit.stopTimer("initScreen")
+screen.setScriptInput("status;Initializing screen;0;1")
 startScan()

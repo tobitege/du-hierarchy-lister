@@ -6,8 +6,10 @@ DEBUG_ONLY = false
 ENABLE_DEBUG_DUMPS = false
 SCREEN_INPUT_LIMIT = 900
 DEBUG_MARKER = "DBG20260409M"
-CACHE_KEY = "hierarchy_scan_cache_v7"
+CACHE_KEY = "hierarchy_scan_cache_v1"
 CACHE_VERSION = 1
+CACHE_CHUNK_LIMIT = 2500
+CACHE_WRITE_FRAME_DELAY = 5
 MAX_PRODUCTS_TO_RESOLVE = 0
 
 core = nil
@@ -31,29 +33,15 @@ for slotName, slot in pairs(unit) do
             databank = slot
         end
 
-        if (elementClass:find("industry", 1, true) or elementClass:find("furnace", 1, true)) and type(slot.getItemId) == "function" then
+        if (
+            elementClass:find("industry", 1, true)
+            or elementClass:find("furnace", 1, true)
+            or elementClass:find("recycler", 1, true)
+            or elementClass:find("refiner", 1, true)
+        ) and type(slot.getItemId) == "function" then
             linkedIndustryElements[#linkedIndustryElements + 1] = slot
         end
     end
-end
-
-function displayName(item)
-    if not item then
-        return "Unknown item"
-    end
-    if item.locDisplayNameWithSize ~= nil and item.locDisplayNameWithSize ~= "" then
-        return item.locDisplayNameWithSize
-    end
-    if item.locDisplayName ~= nil and item.locDisplayName ~= "" then
-        return item.locDisplayName
-    end
-    if item.displayName ~= nil and item.displayName ~= "" then
-        return item.displayName
-    end
-    if item.name ~= nil and item.name ~= "" then
-        return item.name
-    end
-    return "Unknown item"
 end
 
 if screen == nil then
@@ -77,6 +65,8 @@ schematicProductsByItemId = {}
 productRecipeDataByItemId = {}
 producerInfoById = {}
 itemByIdCache = {}
+cacheSourceCodeById = {}
+cacheSchematicIdByCode = {}
 remainingRelevantProductIds = {}
 remainingRelevantItemCount = 0
 firstRelevantSchematicId = nil
@@ -86,6 +76,7 @@ currentView = "status"
 currentResultsPage = 0
 currentDetailPage = 0
 scanSummary = "Waiting to scan"
+stopRequested = false
 
 _loadCo = nil
 _loadArgs = nil
@@ -99,6 +90,38 @@ function bumpYield()
             coroutine.yield()
         end
     end
+end
+
+function yieldFrame()
+    local runningCo, isMain = coroutine.running()
+    if runningCo ~= nil and not isMain then
+        coroutine.yield()
+    end
+end
+
+function yieldFrames(count)
+    local total = math.max(1, tonumber(count or 1) or 1)
+    for _ = 1, total do
+        yieldFrame()
+    end
+end
+
+function clearDatabankKeySlow(key)
+    databank.clearValue(key)
+    yieldFrames(CACHE_WRITE_FRAME_DELAY)
+end
+
+function writeDatabankStringVerified(label, key, value)
+    yieldFrames(CACHE_WRITE_FRAME_DELAY)
+    databank.setStringValue(key, value)
+    yieldFrames(CACHE_WRITE_FRAME_DELAY)
+    local storedValue = databank.getStringValue(key)
+    yieldFrames(CACHE_WRITE_FRAME_DELAY)
+    if tostring(storedValue or "") ~= tostring(value or "") then
+        system.print("cache write verify failed: " .. tostring(label))
+        return false
+    end
+    return true
 end
 
 function getItemYielded(itemId)
@@ -115,24 +138,6 @@ function getRecipesYielded(itemId)
     local recipes = system.getRecipes(itemId) or {}
     bumpYield()
     return recipes
-end
-
-function safeText(value)
-    local text = tostring(value or "")
-    text = text:gsub("[\r\n;|]", " ")
-    return text
-end
-
-function clipLabel(text, maxLength)
-    text = safeText(text)
-    maxLength = tonumber(maxLength or 0) or 0
-    if maxLength <= 0 or string.len(text) <= maxLength then
-        return text
-    end
-    if maxLength <= 3 then
-        return string.sub(text, 1, maxLength)
-    end
-    return string.sub(text, 1, maxLength - 3) .. "..."
 end
 
 function sortedKeys(t)
@@ -164,70 +169,8 @@ function shallowValue(value)
     return string.format("{count=%d %s}", #keys, table.concat(parts, ", "))
 end
 
-function appendLine(lines, text)
-    lines[#lines + 1] = safeText(text)
-end
-
 function hasDatabank()
     return databank ~= nil
-end
-
-function serializeValue(value)
-    local valueType = type(value)
-    if valueType == "nil" then
-        return "nil"
-    end
-    if valueType == "number" or valueType == "boolean" then
-        return tostring(value)
-    end
-    if valueType == "string" then
-        return string.format("%q", value)
-    end
-    if valueType ~= "table" then
-        return "nil"
-    end
-
-    local isArray = true
-    local maxIndex = 0
-    for key in pairs(value) do
-        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
-            isArray = false
-            break
-        end
-        if key > maxIndex then
-            maxIndex = key
-        end
-        bumpYield()
-    end
-
-    local parts = {}
-    if isArray then
-        for i = 1, maxIndex do
-            parts[#parts + 1] = serializeValue(value[i])
-            bumpYield()
-        end
-    else
-        for _, key in ipairs(sortedKeys(value)) do
-            parts[#parts + 1] = "[" .. serializeValue(key) .. "]=" .. serializeValue(value[key])
-            bumpYield()
-        end
-    end
-
-    return "{" .. table.concat(parts, ",") .. "}"
-end
-
-function deserializeValue(serialized)
-    if serialized == nil or serialized == "" then
-        return nil
-    end
-
-    local loader, loadErr = load(serialized)
-    if loader == nil then
-        system.print("cache load error: " .. tostring(loadErr))
-        return nil
-    end
-
-    return loader()
 end
 
 function walkTree(itemId, visited, callback, stopState)
@@ -259,25 +202,6 @@ function walkTree(itemId, visited, callback, stopState)
         end
         bumpYield()
     end
-end
-
-function hasRelevantSchematicName(name)
-    local lowerName = tostring(name or ""):lower()
-    return lowerName:find("schematic") and (
-        lowerName:find("pure")
-        or lowerName:find("product")
-        or lowerName:find("fuel")
-    )
-end
-
-function matchesAnyTerm(text, terms)
-    local lowerText = tostring(text or ""):lower()
-    for _, term in ipairs(terms or {}) do
-        if lowerText:find(term, 1, true) then
-            return true
-        end
-    end
-    return false
 end
 
 function summarizeTopLevel(value)
@@ -472,27 +396,6 @@ function mergeRefs(targetRefs, sourceRefs, seenRefs)
     end
 end
 
-function collectIdListRefs(idList, sourcePath)
-    local refs = {}
-    local seenRefs = {}
-    for index, rawId in ipairs(idList or {}) do
-        local refId = tonumber(rawId or 0)
-        if refId and refId > 0 then
-            local refItem = getItemYielded(refId)
-            mergeRefs(refs, {
-                {
-                    id = refId,
-                    name = displayName(refItem),
-                    quantity = 0,
-                    sourcePath = tostring(sourcePath or "list") .. "." .. tostring(index),
-                }
-            }, seenRefs)
-        end
-        bumpYield()
-    end
-    return refs
-end
-
 function collectFlatIdRefs(idList, sourcePath)
     local refs = {}
     local seenIds = {}
@@ -608,14 +511,6 @@ function getProductRecipeData(productId, knownRecipes)
     return cached
 end
 
-function pushDumpLine(lines, text, maxLines)
-    if #lines >= maxLines then
-        return false
-    end
-    lines[#lines + 1] = safeText(text)
-    return true
-end
-
 function dumpLuaValue(path, value, depth, visited, lines, maxDepth, maxLines)
     if #lines >= maxLines then
         return
@@ -655,47 +550,6 @@ function dumpLuaValue(path, value, depth, visited, lines, maxDepth, maxLines)
         pushDumpLine(lines, path .. " }", maxLines)
     end
     visited[value] = nil
-end
-
-function printDumpLines(prefix, lines)
-    local chunk = {}
-    for _, line in ipairs(lines or {}) do
-        chunk[#chunk + 1] = line
-        if #chunk >= 2 then
-            system.print(prefix .. " " .. table.concat(chunk, " || "))
-            chunk = {}
-            bumpYield()
-        end
-    end
-    if #chunk > 0 then
-        system.print(prefix .. " " .. table.concat(chunk, " || "))
-        bumpYield()
-    end
-end
-
-function summarizeIdList(values)
-    local ids = {}
-    for _, rawValue in ipairs(values or {}) do
-        ids[#ids + 1] = tostring(tonumber(rawValue or 0) or rawValue)
-        bumpYield()
-    end
-    if #ids == 0 then
-        return "[]"
-    end
-    return "[" .. table.concat(ids, ", ") .. "]"
-end
-
-function appendTokenWithinLimit(tokens, token, limit)
-    local nextLength = string.len(table.concat(tokens, ";"))
-    if #tokens > 0 then
-        nextLength = nextLength + 1
-    end
-    nextLength = nextLength + string.len(token or "")
-    if nextLength > (limit or SCREEN_INPUT_LIMIT) then
-        return false
-    end
-    tokens[#tokens + 1] = token
-    return true
 end
 
 function dumpFirstRelevantSchematicToChat()
@@ -838,12 +692,16 @@ function buildResolvedProductResults()
 
     local limit = tonumber(MAX_PRODUCTS_TO_RESOLVE or 0) or 0
     local processed = 0
+    local total = #productIds
     for _, productId in ipairs(productIds) do
         if limit > 0 and processed >= limit then
             break
         end
         addResolvedProductResult(productId)
         processed = processed + 1
+        if shouldRenderProgress(processed, total, 25) then
+            renderProgress("Resolve products", processed, total)
+        end
         bumpYield()
     end
 end
@@ -897,9 +755,14 @@ function collectRelevantSchematics()
         rootChildIds = rootItem.childIds
     end
 
+    renderProgress("Scan schematics", 0, #rootChildIds)
+
     for childIndex, childId in ipairs(rootChildIds) do
         local item = getItemYielded(childId)
         visitedNodeCount = visitedNodeCount + 1
+        if shouldRenderProgress(childIndex, #rootChildIds, 5) then
+            renderProgress("Scan schematics", childIndex, #rootChildIds)
+        end
 
         if item and item.id ~= nil and item.id > 0 then
             local name = displayName(item)
@@ -1099,7 +962,34 @@ end
 function renderStatus(message)
     currentView = "status"
     scanSummary = message or scanSummary
-    screen.setScriptInput("status;" .. safeText(scanSummary))
+    lastOutput = ""
+    screen.setScriptInput("status;" .. safeText(scanSummary) .. ";0;0")
+end
+
+function renderIdle(message)
+    currentView = "idle"
+    scanSummary = message or scanSummary
+    lastOutput = ""
+    screen.setScriptInput("idle;" .. safeText(scanSummary))
+end
+
+function renderProgress(message, current, total)
+    currentView = "status"
+    scanSummary = message or scanSummary
+    lastOutput = ""
+    screen.setScriptInput(table.concat({
+        "status",
+        safeText(scanSummary),
+        tostring(tonumber(current or 0) or 0),
+        tostring(tonumber(total or 0) or 0),
+    }, ";"))
+end
+
+function shouldRenderProgress(current, total, interval)
+    current = tonumber(current or 0) or 0
+    total = tonumber(total or 0) or 0
+    interval = math.max(1, tonumber(interval or 1) or 1)
+    return current <= 1 or current >= total or current % interval == 0
 end
 
 function getEntrySourceCount(entry)
@@ -1111,6 +1001,7 @@ function getEntrySourceCount(entry)
 end
 
 function buildResultListLabel(entry)
+    ensureEntryBasics(entry)
     return string.format(
         "%s [%s]",
         clipLabel(entry.name or "Unknown item", 48),
@@ -1166,29 +1057,44 @@ function renderResults(page)
         end
     end
 
+    lastOutput = ""
     screen.setScriptInput(table.concat(tokens, ";"))
 end
 
-function joinProducerNames(producerRefs)
-    local names = {}
-    for _, producerRef in ipairs(producerRefs or {}) do
-        local suffix = ""
-        if producerRef.tier ~= nil and producerRef.tier ~= "" then
-            suffix = " T" .. tostring(producerRef.tier)
-        end
-        names[#names + 1] = tostring(producerRef.name or producerRef.id or "?") .. suffix
+function ensureEntryBasics(entry)
+    if not entry or (entry.name ~= nil and entry.name ~= "") then
+        return
     end
-    if #names == 0 then
-        return "none"
+
+    local item = getItemYielded(entry.id)
+    if not item or item.id == nil or item.id <= 0 then
+        entry.name = entry.name or ("Item " .. tostring(entry.id or 0))
+        entry.itemType = entry.itemType or ""
+        entry.tier = entry.tier or ""
+        entry.size = entry.size or ""
+        entry.displayClassId = entry.displayClassId or 0
+        entry.childCount = entry.childCount or 0
+        return
     end
-    return table.concat(names, ", ")
+
+    entry.name = displayName(item)
+    entry.itemType = item.type or ""
+    entry.tier = item.tier or ""
+    entry.size = item.size or ""
+    entry.displayClassId = item.displayClassId or 0
+    entry.childCount = #(item.childIds or {})
 end
 
 function ensureEntryDetailData(entry)
-    if not entry or tonumber(entry.recipeCount or 0) <= 0 then
+    if not entry then
+        return
+    end
+    ensureEntryBasics(entry)
+    if entry.detailLoaded then
         return
     end
     if #(entry.matches or {}) > 0 and #(entry.itemIndustryRefs or {}) > 0 then
+        entry.detailLoaded = true
         return
     end
 
@@ -1220,6 +1126,7 @@ function ensureEntryDetailData(entry)
     end
     entry.matches = matches
     entry.matchedRecipeCount = #matches
+    entry.detailLoaded = true
 end
 
 function buildDetailLines(entry)
@@ -1234,6 +1141,10 @@ function buildDetailLines(entry)
     appendLine(lines, "Producers: " .. joinProducerNames(entry.itemIndustryRefs or {}))
 
     for _, source in ipairs(entry.sourceSchematics or {}) do
+        if (source.schematicName == nil or source.schematicName == "") and source.schematicId ~= nil then
+            local schematicItem = getItemYielded(source.schematicId)
+            source.schematicName = displayName(schematicItem)
+        end
         appendLine(lines, string.format(
             "source schematic: %s (%s) x%s",
             source.schematicName or "Unknown schematic",
@@ -1311,6 +1222,7 @@ function renderDetail(itemId, page)
         end
     end
 
+    lastOutput = ""
     screen.setScriptInput(table.concat(tokens, ";"))
 end
 
@@ -1354,75 +1266,35 @@ function buildBucketSummary()
     return table.concat(parts, " ")
 end
 
-function makeCachedMatch(match)
-    return {
-        index = match.index,
-        industryHits = match.industryHits or {},
-        schematicMatches = match.schematicMatches or {},
-        productMatches = match.productMatches or {},
-        ingredientLines = match.ingredientLines or {},
-        productLines = match.productLines or {},
-    }
-end
-
 function makeCachedEntry(entry)
     return {
         id = entry.id,
-        name = entry.name,
         branch = entry.branch,
-        itemType = entry.itemType,
-        tier = entry.tier,
-        size = entry.size,
-        displayClassId = entry.displayClassId,
-        childCount = 0,
-        recipeCount = entry.recipeCount,
-        matchedRecipeCount = entry.matchedRecipeCount,
-        sourceCount = getEntrySourceCount(entry),
-        itemIndustryHits = {},
-        itemProductHits = {},
-        itemSchematicHits = {},
-        itemIndustryRefs = {},
-        itemProductRefs = {},
-        sourceSchematics = {},
-        matches = {},
+        sourceSchematics = entry.sourceSchematics or {},
     }
 end
 
-function sanitizeCacheField(value)
-    local text = tostring(value or "")
-    text = text:gsub("[\r\n|]", " ")
-    return text
+function buildSchematicCodeMaps()
+    local codeById = {}
+    local idByCode = {}
+    for index, schematic in ipairs(relevantSchematicList or {}) do
+        local schematicId = tonumber(schematic and schematic.id or 0) or 0
+        if schematicId > 0 then
+            local code = encodeIndexCode(index)
+            codeById[schematicId] = code
+            idByCode[code] = schematicId
+        end
+    end
+    return codeById, idByCode
 end
 
 function makeCompactCachedLine(entry)
     local fields = {
         tostring(entry.id or 0),
-        sanitizeCacheField(entry.name),
-        sanitizeCacheField(entry.branch),
-        sanitizeCacheField(entry.itemType),
-        sanitizeCacheField(entry.tier),
-        sanitizeCacheField(entry.size),
-        tostring(entry.displayClassId or 0),
-        tostring(entry.recipeCount or 0),
-        tostring(entry.matchedRecipeCount or 0),
-        tostring(getEntrySourceCount(entry)),
+        encodeBucket(entry.branch),
+        encodeSourceSchematics(entry.sourceSchematics or {}, cacheSourceCodeById),
     }
     return table.concat(fields, "|")
-end
-
-function splitCacheLine(line)
-    local fields = {}
-    local startIndex = 1
-    while true do
-        local separatorIndex = string.find(line, "|", startIndex, true)
-        if separatorIndex == nil then
-            fields[#fields + 1] = string.sub(line, startIndex)
-            break
-        end
-        fields[#fields + 1] = string.sub(line, startIndex, separatorIndex - 1)
-        startIndex = separatorIndex + 1
-    end
-    return fields
 end
 
 function parseCompactCachedLine(line)
@@ -1434,23 +1306,24 @@ function parseCompactCachedLine(line)
 
     return {
         id = entryId,
-        name = fields[2] or "",
-        branch = fields[3] or "Unknown",
-        itemType = fields[4] or "",
-        tier = fields[5] or "",
-        size = fields[6] or "",
-        displayClassId = tonumber(fields[7] or 0) or 0,
+        name = "",
+        branch = decodeBucket(fields[2]),
+        itemType = "",
+        tier = "",
+        size = "",
+        displayClassId = 0,
         childCount = 0,
-        recipeCount = tonumber(fields[8] or 0) or 0,
-        matchedRecipeCount = tonumber(fields[9] or 0) or 0,
-        sourceCount = tonumber(fields[10] or 0) or 0,
+        recipeCount = 0,
+        matchedRecipeCount = 0,
+        sourceCount = 0,
         itemIndustryHits = {},
         itemProductHits = {},
         itemSchematicHits = {},
         itemIndustryRefs = {},
         itemProductRefs = {},
-        sourceSchematics = {},
+        sourceSchematics = decodeSourceSchematics(fields[3], cacheSchematicIdByCode),
         matches = {},
+        detailLoaded = false,
     }
 end
 
@@ -1462,11 +1335,43 @@ function getCacheChunkKey(index)
     return CACHE_KEY .. ":chunk:" .. tostring(index)
 end
 
+function getExistingCacheKeys()
+    local keys = {}
+    local keyList = databank.getKeyList() or {}
+    local prefix = CACHE_KEY .. ":"
+    for _, key in ipairs(keyList) do
+        local keyText = tostring(key or "")
+        if keyText == CACHE_KEY or string.sub(keyText, 1, string.len(prefix)) == prefix then
+            keys[#keys + 1] = keyText
+        end
+        bumpYield()
+    end
+    table.sort(keys)
+    return keys
+end
+
+function clearExistingCacheData()
+    if not hasDatabank() then
+        return 0
+    end
+
+    local keys = getExistingCacheKeys()
+    local totalOps = #keys
+    renderProgress("Clear cache", 0, totalOps)
+    for index, key in ipairs(keys) do
+        clearDatabankKeySlow(key)
+        renderProgress("Clear cache", index, totalOps)
+    end
+
+    return #keys
+end
+
 function buildCompactCachePayload(maxChunkLength)
     local chunkLimit = tonumber(maxChunkLength or 12000) or 12000
     local chunks = {}
     local currentChunkLines = {}
     local currentChunkLength = 0
+    cacheSourceCodeById, cacheSchematicIdByCode = buildSchematicCodeMaps()
 
     for _, entry in ipairs(scanResults) do
         local line = makeCompactCachedLine(makeCachedEntry(entry))
@@ -1493,43 +1398,17 @@ function buildCompactCachePayload(maxChunkLength)
         chunks[#chunks + 1] = table.concat(currentChunkLines, "\n")
     end
 
-    return {
-        format = "compact_v1",
+    local meta = {
+        format = "compact_v3",
         version = CACHE_VERSION,
         generatedAt = system.getUtcTime(),
         scanSummary = scanSummary,
         schematicCount = #relevantSchematicList,
         resultCount = #scanResults,
         chunkCount = #chunks,
-    }, chunks
-end
-
-function restoreCachePayload(payload)
-    if type(payload) ~= "table" or tonumber(payload.version or 0) ~= CACHE_VERSION then
-        return false
-    end
-
-    scanResults = {}
-    resultByItemId = {}
-    for _, entry in ipairs(payload.results or {}) do
-        local cachedEntry = makeCachedEntry(entry)
-        scanResults[#scanResults + 1] = cachedEntry
-        resultByItemId[tonumber(cachedEntry.id or 0)] = cachedEntry
-        bumpYield()
-    end
-
-    relevantSchematicList = {}
-    relevantSchematics = {}
-
-    scanSummary = tostring(payload.scanSummary or "")
-    if scanSummary == "" then
-        scanSummary = string.format("schematics=%d products=%d", tonumber(payload.schematicCount or 0) or 0, #scanResults)
-    end
-    scanSummary = scanSummary .. " [cached]"
-    selectedItemId = nil
-    currentResultsPage = 0
-    currentDetailPage = 0
-    return true
+        schematicMap = encodeSchematicMap(cacheSchematicIdByCode),
+    }
+    return meta, chunks
 end
 
 function saveCacheToDatabank()
@@ -1540,11 +1419,20 @@ function saveCacheToDatabank()
         return false
     end
 
-    local meta, chunks = buildCompactCachePayload(12000)
-    databank.setStringValue(getCacheMetaKey(), "return " .. serializeValue(meta))
+    local meta, chunks = buildCompactCachePayload(CACHE_CHUNK_LIMIT)
+    clearExistingCacheData()
+    renderProgress("Save cache", 0, #chunks)
     for index, chunk in ipairs(chunks or {}) do
-        databank.setStringValue(getCacheChunkKey(index), chunk)
-        bumpYield()
+        renderProgress("Save cache", index, #chunks)
+        if not writeDatabankStringVerified("chunk " .. tostring(index), getCacheChunkKey(index), chunk) then
+            renderStatus("Cache write failed at chunk " .. tostring(index))
+            return false
+        end
+    end
+    if not writeDatabankStringVerified("meta", getCacheMetaKey(), buildCacheMetaString(meta)) then
+        renderStatus("Cache write failed at meta")
+        clearDatabankKeySlow(getCacheMetaKey())
+        return false
     end
     system.print(string.format("cache saved: chunks=%d results=%d", #chunks, #scanResults))
     return true
@@ -1558,11 +1446,15 @@ function loadCacheFromDatabank()
         return false
     end
 
-    local meta = deserializeValue(databank.getStringValue(getCacheMetaKey()))
-    if type(meta) == "table" and tostring(meta.format or "") == "compact_v1" and tonumber(meta.version or 0) == CACHE_VERSION then
+    local meta = parseCacheMetaString(databank.getStringValue(getCacheMetaKey()))
+    if type(meta) == "table" then
         scanResults = {}
         resultByItemId = {}
-        for index = 1, tonumber(meta.chunkCount or 0) or 0 do
+        cacheSchematicIdByCode = decodeSchematicMap(meta.schematicMap or "")
+        local chunkCount = tonumber(meta.chunkCount or 0) or 0
+        renderProgress("Load cache", 0, chunkCount)
+        for index = 1, chunkCount do
+            renderProgress("Load cache", index, chunkCount)
             local chunk = databank.getStringValue(getCacheChunkKey(index))
             for line in tostring(chunk or ""):gmatch("[^\n]+") do
                 local entry = parseCompactCachedLine(line)
@@ -1586,14 +1478,7 @@ function loadCacheFromDatabank()
         currentDetailPage = 0
         return true
     end
-
-    local serialized = databank.getStringValue(CACHE_KEY)
-    local payload = deserializeValue(serialized)
-    if payload == nil then
-        return false
-    end
-
-    return restoreCachePayload(payload)
+    return false
 end
 
 function _scanCoroutine()
@@ -1606,7 +1491,6 @@ function _scanCoroutine()
     dumpedSchematicId = nil
     _yieldCounter = 0
 
-    renderStatus("Scan schematics")
     collectRelevantSchematics()
     if ENABLE_DEBUG_DUMPS then
         renderStatus("Dump first schematic")
@@ -1620,7 +1504,7 @@ function _scanCoroutine()
         return
     end
 
-    renderStatus("Resolve products")
+    renderProgress("Resolve products", 0, 0)
     buildResolvedProductResults()
 
     sortScanResults()
@@ -1642,13 +1526,16 @@ function _scanCoroutine()
         )
     end
     system.print(scanSummary)
-    renderStatus("Save cache")
     saveCacheToDatabank()
     renderResults(0)
 end
 
 function startScan(forceRescan)
     local shouldForceRescan = forceRescan == true
+    stopRequested = false
+    if not shouldForceRescan and hasDatabank() then
+        renderProgress("Load cache", 0, 1)
+    end
     if not shouldForceRescan and loadCacheFromDatabank() then
         renderResults(0)
         return
