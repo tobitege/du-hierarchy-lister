@@ -48,6 +48,24 @@ On startup, the board:
 
 During longer scans, the screen may briefly show intermediate status messages such as organizing scanned data, indexing products, building the result summary, or preparing cache data. Those messages indicate that the script is still working between the main scan phases.
 
+## Screenshots
+
+The first step is to scan all available schematics that relate to our scan.
+
+<img src="images/recipe_scan_schematics.png" alt="Recipe scan schematics" width="900" height="500">
+
+The resolver view shows live scan progress while the board collects products and prepares cache data.
+
+<img src="images/recipe_scan_resolver.png" alt="Recipe scan resolver" width="900" height="500">
+
+The products view lists detected items by industry family and provides linked-industry filter buttons at the bottom.
+
+<img src="images/products_view.png" alt="Products view" width="900" height="500">
+
+The detail page shows the selected product, its producer machines, source schematic, and the single resolved recipe breakdown.
+
+<img src="images/details_page.png" alt="Details page" width="900" height="500">
+
 ## Why It Scans
 
 The script does not rely on a hardcoded item list.
@@ -132,17 +150,3 @@ The goal is to make it easier to verify why a product was placed in a certain in
 - Cached entries are compact on purpose, so some detail data is rebuilt when you open an item.
 - The script only targets the current five industry families listed above.
 - The script expects products to resolve to one of the five supported industry families above.
-
-## Files
-
-Main script files:
-
-- [library_onStart.lua](/d:/github/du-hierarchy-lister/library_onStart.lua)
-- [unit_onStart.lua](/d:/github/du-hierarchy-lister/unit_onStart.lua)
-- [unit_onTimer_initScreen.lua](/d:/github/du-hierarchy-lister/unit_onTimer_initScreen.lua)
-- [unit_onTimer_coTick.lua](/d:/github/du-hierarchy-lister/unit_onTimer_coTick.lua)
-- [system_onUpdate.lua](/d:/github/du-hierarchy-lister/system_onUpdate.lua)
-
-Original source JSON:
-
-- [markosolo_HiearchyLister-fixed.json](/d:/github/du-hierarchy-lister/markosolo_HiearchyLister-fixed.json)
