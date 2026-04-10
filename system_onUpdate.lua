@@ -27,6 +27,13 @@ if rawOutput and rawOutput ~= "" and rawOutput ~= lastOutput then
         return
     end
 
+    local filterKey = rawOutput:match("^filter:(.+)$")
+    if filterKey then
+        setResultsFilter(filterKey)
+        renderResults(0)
+        return
+    end
+
     local pageNum = rawOutput:match("^page:(%-?%d+)$")
     if pageNum then
         local page = tonumber(pageNum) or 0

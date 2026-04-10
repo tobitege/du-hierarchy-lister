@@ -187,37 +187,43 @@ function sanitizeCacheField(value)
 end
 
 function encodeBucket(branch)
-    local branchName = tostring(branch or "Unknown")
+    local branchName = tostring(branch or "")
     if branchName == "Honeycomb" then
-        return "H"
+        return "HC"
     end
     if branchName == "Chemical" then
-        return "C"
+        return "CH"
     end
     if branchName == "Glass Furnace" then
-        return "G"
+        return "GF"
     end
-    if branchName == "Mixed" then
-        return "M"
+    if branchName == "Refiner" then
+        return "RF"
     end
-    return "U"
+    if branchName == "Recycler" then
+        return "RC"
+    end
+    return ""
 end
 
 function decodeBucket(code)
     local bucketCode = tostring(code or "")
-    if bucketCode == "H" then
+    if bucketCode == "HC" then
         return "Honeycomb"
     end
-    if bucketCode == "C" then
+    if bucketCode == "CH" then
         return "Chemical"
     end
-    if bucketCode == "G" then
+    if bucketCode == "GF" then
         return "Glass Furnace"
     end
-    if bucketCode == "M" then
-        return "Mixed"
+    if bucketCode == "RF" then
+        return "Refiner"
     end
-    return "Unknown"
+    if bucketCode == "RC" then
+        return "Recycler"
+    end
+    return ""
 end
 
 function encodeIndexCode(index)
@@ -246,33 +252,57 @@ function encodeIndexCode(index)
     return table.concat(code)
 end
 
-function encodeSourceSchematics(sourceSchematics, codeById)
+function encodeSourceSchematic(sourceSchematic, codeById)
+    local schematicId = tonumber(sourceSchematic and sourceSchematic.schematicId or 0) or 0
+    local code = codeById and codeById[schematicId] or nil
+    if code == nil or code == "" then
+        return ""
+    end
+    return code
+end
+
+function decodeSourceSchematic(encoded, idByCode)
+    local code = tostring(encoded or "")
+    if code == "" then
+        return nil
+    end
+
+    local schematicId = idByCode and idByCode[code] or nil
+    if schematicId ~= nil and schematicId > 0 then
+        return {
+            schematicId = schematicId,
+            quantity = 1,
+        }
+    end
+    return nil
+end
+
+function encodeProducerFilterKinds(producerFilterKinds)
     local parts = {}
-    local seenCodes = {}
-    for _, source in ipairs(sourceSchematics or {}) do
-        local schematicId = tonumber(source and source.schematicId or 0) or 0
-        local code = codeById and codeById[schematicId] or nil
-        if code ~= nil and code ~= "" and not seenCodes[code] then
-            parts[#parts + 1] = code
-            seenCodes[code] = true
+    local seenKinds = {}
+    for _, rawKind in ipairs(producerFilterKinds or {}) do
+        local kind = tostring(rawKind or "")
+        if kind ~= "" and not seenKinds[kind] then
+            parts[#parts + 1] = kind
+            seenKinds[kind] = true
         end
     end
     table.sort(parts)
     return table.concat(parts, ".")
 end
 
-function decodeSourceSchematics(encoded, idByCode)
-    local sourceSchematics = {}
-    for code in tostring(encoded or ""):gmatch("[^.]+") do
-        local schematicId = idByCode and idByCode[code] or nil
-        if schematicId ~= nil and schematicId > 0 then
-            sourceSchematics[#sourceSchematics + 1] = {
-                schematicId = schematicId,
-                quantity = 1,
-            }
+function decodeProducerFilterKinds(raw)
+    local producerFilterKinds = {}
+    local seenKinds = {}
+    for code in tostring(raw or ""):gmatch("[^.]+") do
+        local kind = tostring(code or "")
+        if kind ~= "" and not seenKinds[kind] then
+            producerFilterKinds[#producerFilterKinds + 1] = kind
+            seenKinds[kind] = true
         end
     end
-    return sourceSchematics
+    table.sort(producerFilterKinds)
+    return producerFilterKinds
 end
 
 function encodeSchematicMap(idByCode)
@@ -383,6 +413,12 @@ function HierarchyCache:classifyProducerBucket(producerRef)
     if lowerName:find("glass furnace", 1, true) then
         return "Glass Furnace"
     end
+    if lowerName:find("refiner", 1, true) then
+        return "Refiner"
+    end
+    if lowerName:find("recycler", 1, true) then
+        return "Recycler"
+    end
     if lowerName:find("chemical industry", 1, true) then
         return "Chemical"
     end
@@ -394,12 +430,9 @@ end
 
 function HierarchyCache:bucketFromOrderedList(orderedBuckets)
     if #orderedBuckets == 0 then
-        return "Unknown"
+        return ""
     end
-    if #orderedBuckets == 1 then
-        return orderedBuckets[1]
-    end
-    return "Mixed"
+    return orderedBuckets[1]
 end
 
 function HierarchyCache:getProducerInfo(producerId)
@@ -440,6 +473,7 @@ function HierarchyCache:buildProductRecipeData(productId, recipes)
                     sourcePath = "producers",
                     tier = producerInfo.tier,
                     classId = producerInfo.classId,
+                    bucket = producerInfo.bucket,
                 }
                 if producerInfo.bucket and not seenBuckets[producerInfo.bucket] then
                     seenBuckets[producerInfo.bucket] = true
@@ -557,7 +591,8 @@ function HierarchyCache:makeCachedEntry(entry)
     return {
         id = entry.id,
         branch = entry.branch,
-        sourceSchematics = entry.sourceSchematics or {},
+        sourceSchematic = entry.sourceSchematic,
+        producerFilterKinds = entry.producerFilterKinds or {},
     }
 end
 
@@ -565,7 +600,8 @@ function HierarchyCache:makeCompactCachedLine(entry)
     local fields = {
         tostring(entry.id or 0),
         encodeBucket(entry.branch),
-        encodeSourceSchematics(entry.sourceSchematics or {}, self.cacheSourceCodeById),
+        encodeSourceSchematic(entry.sourceSchematic, self.cacheSourceCodeById),
+        encodeProducerFilterKinds(entry.producerFilterKinds or {}),
     }
     return table.concat(fields, "|")
 end
@@ -588,13 +624,13 @@ function HierarchyCache:parseCompactCachedLine(line)
         childCount = 0,
         recipeCount = 0,
         matchedRecipeCount = 0,
-        sourceCount = 0,
         itemIndustryHits = {},
         itemProductHits = {},
         itemSchematicHits = {},
         itemIndustryRefs = {},
         itemProductRefs = {},
-        sourceSchematics = decodeSourceSchematics(fields[3], self.cacheSchematicIdByCode),
+        sourceSchematic = decodeSourceSchematic(fields[3], self.cacheSchematicIdByCode),
+        producerFilterKinds = decodeProducerFilterKinds(fields[4]),
         matches = {},
         detailLoaded = false,
     }

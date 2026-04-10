@@ -70,12 +70,133 @@ selectedItemId = nil
 currentView = "status"
 currentResultsPage = 0
 currentDetailPage = 0
+currentResultsFilterId = ""
 scanSummary = "Waiting to scan"
 stopRequested = false
+linkedIndustryFilters = {}
+linkedIndustryFilterByKey = {}
 
 _loadCo = nil
 _loadArgs = nil
 _yieldCounter = 0
+
+function getIndustryKindCode(value)
+    local lowerText = tostring(value or ""):lower()
+    if lowerText:find("glass furnace", 1, true) then
+        return "gf"
+    end
+    if lowerText:find("refiner", 1, true) then
+        return "rf"
+    end
+    if lowerText:find("recycler", 1, true) then
+        return "rc"
+    end
+    if lowerText:find("chemical", 1, true) then
+        return "ch"
+    end
+    if lowerText:find("honeycomb", 1, true) then
+        return "hc"
+    end
+    return ""
+end
+
+function getIndustryKindLabel(kindCode)
+    if kindCode == "gf" then
+        return "Glass Furnace"
+    end
+    if kindCode == "rf" then
+        return "Refiner"
+    end
+    if kindCode == "rc" then
+        return "Recycler"
+    end
+    if kindCode == "ch" then
+        return "Chemical"
+    end
+    if kindCode == "hc" then
+        return "Honeycomb"
+    end
+    return ""
+end
+
+function collectProducerFilterKinds(producerRefs)
+    local producerFilterKinds = {}
+    local seenKinds = {}
+    for _, producerRef in ipairs(producerRefs or {}) do
+        local kindCode = tostring(producerRef and producerRef.bucket or "")
+        if kindCode == "" then
+            kindCode = getIndustryKindCode(producerRef and producerRef.name or "")
+        else
+            kindCode = getIndustryKindCode(kindCode)
+        end
+        if kindCode ~= "" and not seenKinds[kindCode] then
+            producerFilterKinds[#producerFilterKinds + 1] = kindCode
+            seenKinds[kindCode] = true
+        end
+    end
+    table.sort(producerFilterKinds)
+    return producerFilterKinds
+end
+
+function buildProducerFilterKindSet(producerFilterKinds)
+    local kindSet = {}
+    for _, kindCode in ipairs(producerFilterKinds or {}) do
+        if tostring(kindCode or "") ~= "" then
+            kindSet[tostring(kindCode)] = true
+        end
+    end
+    return kindSet
+end
+
+function buildLinkedIndustryFilters()
+    linkedIndustryFilters = {}
+    linkedIndustryFilterByKey = {}
+
+    local seenKeys = {}
+    for _, slot in ipairs(linkedIndustryElements or {}) do
+        local itemId = tonumber(slot and slot.getItemId and slot.getItemId() or 0) or 0
+        if itemId > 0 then
+            local item = system.getItem(itemId)
+            local kindCode = getIndustryKindCode((item and displayName(item) or "") .. " " .. tostring(slot.elementClass or ""))
+            if kindCode ~= "" and not seenKeys[kindCode] then
+                local entry = {
+                    key = kindCode,
+                    itemId = itemId,
+                    label = getIndustryKindLabel(kindCode),
+                    iconPath = item and item.iconPath or "",
+                }
+                linkedIndustryFilters[#linkedIndustryFilters + 1] = entry
+                linkedIndustryFilterByKey[kindCode] = entry
+                seenKeys[kindCode] = true
+            end
+        end
+    end
+
+    table.sort(linkedIndustryFilters, function(a, b)
+        local aLabel = tostring(a and a.label or "")
+        local bLabel = tostring(b and b.label or "")
+        if aLabel == bLabel then
+            return tostring(a and a.key or "") < tostring(b and b.key or "")
+        end
+        return aLabel < bLabel
+    end)
+end
+
+function buildLinkedIndustryFiltersRenderDefs()
+    local defs = { "{" }
+    for _, def in ipairs(linkedIndustryFilters or {}) do
+        defs[#defs + 1] = string.format(
+            "{ key = %q, label = %q, iconPath = %q },",
+            tostring(def.key or ""),
+            safeText(def.label or ""),
+            tostring(def.iconPath or "")
+        )
+    end
+    defs[#defs + 1] = "}"
+    return table.concat(defs, "\n")
+end
+
+buildLinkedIndustryFilters()
 
 function bumpYield()
     _yieldCounter = _yieldCounter + 1
@@ -474,8 +595,9 @@ function addSchematicResult(item, industryHits, productHits, industryRefs, produ
         itemIndustryHits = industryHits,
         itemProductHits = productHits,
         itemIndustryRefs = industryRefs,
+        producerFilterKinds = collectProducerFilterKinds(industryRefs),
         itemProductRefs = productRefs,
-        sourceSchematics = {},
+        sourceSchematic = nil,
     }
 
     scanResults[#scanResults + 1] = entry
@@ -483,8 +605,8 @@ function addSchematicResult(item, industryHits, productHits, industryRefs, produ
 end
 
 function addResolvedProductResult(itemId)
-    local sourceSchematics = schematicProductsByItemId[itemId] or {}
-    if #sourceSchematics == 0 or resultByItemId[itemId] ~= nil then
+    local sourceSchematic = schematicProductsByItemId[itemId]
+    if sourceSchematic == nil or resultByItemId[itemId] ~= nil then
         return
     end
 
@@ -494,7 +616,7 @@ function addResolvedProductResult(itemId)
     end
 
     local productRecipeData = getProductRecipeData(itemId)
-    local productBucket = productRecipeData.bucket or "Unknown"
+    local productBucket = productRecipeData.bucket or ""
 
     local itemIndustryHits = {}
     itemIndustryHits[#itemIndustryHits + 1] = "industryBucket=" .. tostring(productBucket)
@@ -508,7 +630,7 @@ function addResolvedProductResult(itemId)
     end
 
     local itemSchematicHits = {
-        "sourceSchematics.count=" .. tostring(#sourceSchematics),
+        "sourceSchematic=" .. tostring(sourceSchematic.schematicId or 0),
     }
 
     local entry = {
@@ -528,8 +650,9 @@ function addResolvedProductResult(itemId)
         itemIndustryHits = itemIndustryHits,
         itemSchematicHits = itemSchematicHits,
         itemIndustryRefs = productRecipeData.producerRefs or {},
+        producerFilterKinds = collectProducerFilterKinds(productRecipeData.producerRefs or {}),
         itemProductRefs = {},
-        sourceSchematics = sourceSchematics,
+        sourceSchematic = sourceSchematic,
     }
 
     scanResults[#scanResults + 1] = entry
@@ -638,10 +761,9 @@ function collectRelevantSchematics()
 
                 for _, productRef in ipairs(productRefs) do
                     if schematicProductsByItemId[productRef.id] == nil then
-                        schematicProductsByItemId[productRef.id] = {}
                         uniqueProductCount = uniqueProductCount + 1
                     end
-                    schematicProductsByItemId[productRef.id][#schematicProductsByItemId[productRef.id] + 1] = {
+                    schematicProductsByItemId[productRef.id] = {
                         schematicId = item.id,
                         schematicName = name,
                         quantity = productRef.quantity or 0,
@@ -711,14 +833,14 @@ function collectRecipeMatchDetails(recipe, recipeIndex)
 
     local productMatches = {}
     for _, product in ipairs(recipe.products or {}) do
-        local sourceSchematics = schematicProductsByItemId[product.id]
-        if sourceSchematics then
+        local sourceSchematic = schematicProductsByItemId[product.id]
+        if sourceSchematic then
             local productItem = getItemYielded(product.id)
             productMatches[#productMatches + 1] = {
                 id = product.id,
                 name = displayName(productItem),
                 quantity = product.quantity or 0,
-                schematics = sourceSchematics,
+                sourceSchematic = sourceSchematic,
             }
         end
     end
@@ -744,8 +866,8 @@ function collectRecipeMatchDetails(recipe, recipeIndex)
 end
 
 function addMatchingItem(branchLabel, item)
-    local sourceSchematics = schematicProductsByItemId[item.id] or {}
-    if #sourceSchematics == 0 then
+    local sourceSchematic = schematicProductsByItemId[item.id]
+    if sourceSchematic == nil then
         return
     end
 
@@ -777,7 +899,7 @@ function addMatchingItem(branchLabel, item)
     end
 
     local itemSchematicHits = {}
-    itemSchematicHits[#itemSchematicHits + 1] = "sourceSchematics.count=" .. tostring(#sourceSchematics)
+    itemSchematicHits[#itemSchematicHits + 1] = "sourceSchematic=" .. tostring(sourceSchematic.schematicId or 0)
 
     local scalarLines, tableLines = summarizeTopLevel(item)
 
@@ -798,8 +920,9 @@ function addMatchingItem(branchLabel, item)
         itemIndustryHits = itemIndustryHits,
         itemSchematicHits = itemSchematicHits,
         itemIndustryRefs = productRecipeData.producerRefs or {},
+        producerFilterKinds = collectProducerFilterKinds(productRecipeData.producerRefs or {}),
         itemProductRefs = {},
-        sourceSchematics = sourceSchematics,
+        sourceSchematic = sourceSchematic,
     }
 
     scanResults[#scanResults + 1] = entry
@@ -856,11 +979,118 @@ function shouldRenderProgress(current, total, interval)
 end
 
 function getEntrySourceCount(entry)
-    local sourceCount = tonumber(entry and entry.sourceCount or 0) or 0
-    if sourceCount > 0 then
-        return sourceCount
+    if entry and entry.sourceSchematic ~= nil then
+        return 1
     end
-    return #((entry and entry.sourceSchematics) or {})
+    return 0
+end
+
+function buildResultsFilterKey(activeFilterSet)
+    local parts = {}
+    for kindCode, isActive in pairs(activeFilterSet or {}) do
+        if isActive and linkedIndustryFilterByKey[kindCode] ~= nil then
+            parts[#parts + 1] = tostring(kindCode)
+        end
+    end
+    table.sort(parts)
+    return table.concat(parts, ".")
+end
+
+function normalizeResultsFilterKey(filterKey)
+    local keyText = tostring(filterKey or "")
+    if keyText == "" or keyText == "all" then
+        return ""
+    end
+
+    local activeFilterSet = {}
+    for kindCode in keyText:gmatch("[^.]+") do
+        if linkedIndustryFilterByKey[kindCode] ~= nil then
+            activeFilterSet[kindCode] = true
+        end
+    end
+    return buildResultsFilterKey(activeFilterSet)
+end
+
+function buildResultsFilterKeySet(filterKey)
+    local activeFilterSet = {}
+    local normalizedKey = normalizeResultsFilterKey(filterKey)
+    if normalizedKey == "" then
+        return activeFilterSet
+    end
+
+    for kindCode in normalizedKey:gmatch("[^.]+") do
+        activeFilterSet[kindCode] = true
+    end
+    return activeFilterSet
+end
+
+function ensureEntryProducerFilterKinds(entry)
+    if not entry then
+        return {}
+    end
+
+    if entry.producerFilterKinds == nil then
+        entry.producerFilterKinds = collectProducerFilterKinds(entry.itemIndustryRefs or {})
+    end
+    if #entry.producerFilterKinds == 0 and #(entry.itemIndustryRefs or {}) > 0 then
+        entry.producerFilterKinds = collectProducerFilterKinds(entry.itemIndustryRefs or {})
+    end
+    if #entry.producerFilterKinds == 0 and entry.id ~= nil then
+        local productRecipeData = getProductRecipeData(entry.id)
+        entry.itemIndustryRefs = productRecipeData.producerRefs or entry.itemIndustryRefs or {}
+        entry.producerFilterKinds = collectProducerFilterKinds(entry.itemIndustryRefs or {})
+    end
+    entry.producerFilterKindSet = buildProducerFilterKindSet(entry.producerFilterKinds)
+    return entry.producerFilterKinds
+end
+
+function entryMatchesResultsFilter(entry, filterKey)
+    local activeFilterSet = buildResultsFilterKeySet(filterKey)
+    if next(activeFilterSet) == nil then
+        return true
+    end
+
+    ensureEntryProducerFilterKinds(entry)
+    for kindCode in pairs(activeFilterSet) do
+        if entry.producerFilterKindSet[kindCode] == true then
+            return true
+        end
+    end
+    return false
+end
+
+function getFilteredScanResults()
+    currentResultsFilterId = normalizeResultsFilterKey(currentResultsFilterId)
+    if currentResultsFilterId == "" then
+        return scanResults
+    end
+
+    local filtered = {}
+    for _, entry in ipairs(scanResults or {}) do
+        if entryMatchesResultsFilter(entry, currentResultsFilterId) then
+            filtered[#filtered + 1] = entry
+        end
+        bumpYield()
+    end
+    return filtered
+end
+
+function setResultsFilter(filterKey)
+    local normalizedKey = normalizeResultsFilterKey(filterKey)
+    if normalizedKey == "" then
+        currentResultsFilterId = ""
+        currentResultsPage = 0
+        return
+    end
+
+    local activeFilterSet = buildResultsFilterKeySet(currentResultsFilterId)
+    if activeFilterSet[normalizedKey] then
+        activeFilterSet[normalizedKey] = nil
+    else
+        activeFilterSet[normalizedKey] = true
+    end
+    currentResultsFilterId = buildResultsFilterKey(activeFilterSet)
+    currentResultsPage = 0
 end
 
 function buildResultListLabel(entry)
@@ -872,9 +1102,9 @@ function buildResultListLabel(entry)
     )
 end
 
-function buildResultPageStarts()
+function buildResultPageStarts(entries)
     local starts = {}
-    local count = #scanResults
+    local count = #(entries or {})
     if count <= 0 then
         return { 1 }
     end
@@ -890,10 +1120,12 @@ end
 
 function renderResults(page)
     currentView = "results"
+    currentResultsFilterId = normalizeResultsFilterKey(currentResultsFilterId)
     currentResultsPage = math.max(0, tonumber(page) or 0)
 
-    local count = #scanResults
-    local pageStarts = buildResultPageStarts()
+    local filteredResults = getFilteredScanResults()
+    local count = #filteredResults
+    local pageStarts = buildResultPageStarts(filteredResults)
     local maxPage = math.max(0, #pageStarts - 1)
     if currentResultsPage > maxPage then
         currentResultsPage = maxPage
@@ -905,6 +1137,7 @@ function renderResults(page)
         tostring(maxPage + 1),
         tostring(count),
         safeText(scanSummary),
+        currentResultsFilterId ~= "" and currentResultsFilterId or "all",
     }
 
     local startIndex = pageStarts[currentResultsPage + 1] or 1
@@ -913,7 +1146,7 @@ function renderResults(page)
         endIndex = (pageStarts[currentResultsPage + 2] or (count + 1)) - 1
     end
     for index = startIndex, endIndex do
-        local entry = scanResults[index]
+        local entry = filteredResults[index]
         local label = buildResultListLabel(entry)
         if not appendTokenWithinLimit(tokens, safeText(label) .. "|" .. tostring(entry.id), SCREEN_INPUT_LIMIT) then
             break
@@ -956,7 +1189,7 @@ function ensureEntryDetailData(entry)
     if entry.detailLoaded then
         return
     end
-    if #(entry.matches or {}) > 0 and #(entry.itemIndustryRefs or {}) > 0 then
+    if entry.match ~= nil and #(entry.itemIndustryRefs or {}) > 0 then
         entry.detailLoaded = true
         return
     end
@@ -965,6 +1198,8 @@ function ensureEntryDetailData(entry)
     local productRecipeData = getProductRecipeData(entry.id, recipes)
     entry.recipeCount = #recipes
     entry.itemIndustryRefs = productRecipeData.producerRefs or {}
+    entry.producerFilterKinds = collectProducerFilterKinds(entry.itemIndustryRefs or {})
+    entry.producerFilterKindSet = buildProducerFilterKindSet(entry.producerFilterKinds)
 
     local itemIndustryHits = {
         "industryBucket=" .. tostring(productRecipeData.bucket or entry.branch or "Unknown"),
@@ -979,17 +1214,50 @@ function ensureEntryDetailData(entry)
     end
     entry.itemIndustryHits = itemIndustryHits
 
-    local matches = {}
+    local match = nil
     for recipeIndex, recipe in ipairs(recipes) do
         local matchDetail = collectRecipeMatchDetails(recipe, recipeIndex)
         if matchDetail then
-            matches[#matches + 1] = matchDetail
+            match = matchDetail
+            break
         end
         bumpYield()
     end
-    entry.matches = matches
-    entry.matchedRecipeCount = #matches
+    entry.match = match
+    entry.matchedRecipeCount = match ~= nil and 1 or 0
     entry.detailLoaded = true
+end
+
+function appendWrappedDetailLine(lines, text, maxLength, continuationIndent)
+    local normalizedText = tostring(text or "")
+    local lineLimit = math.max(24, tonumber(maxLength or 0) or 72)
+    local nextIndent = tostring(continuationIndent or "")
+
+    if normalizedText == "" then
+        appendLine(lines, "")
+        return
+    end
+
+    local currentLine = ""
+    local isFirstLine = true
+    for word in normalizedText:gmatch("%S+") do
+        if currentLine == "" then
+            currentLine = (isFirstLine and "" or nextIndent) .. word
+        else
+            local candidate = currentLine .. " " .. word
+            if #candidate <= lineLimit then
+                currentLine = candidate
+            else
+                appendLine(lines, currentLine)
+                currentLine = nextIndent .. word
+                isFirstLine = false
+            end
+        end
+    end
+
+    if currentLine ~= "" then
+        appendLine(lines, currentLine)
+    end
 end
 
 function buildDetailLines(entry)
@@ -1000,39 +1268,37 @@ function buildDetailLines(entry)
     appendLine(lines, string.format("Item ID: %s", tostring(entry.id)))
     appendLine(lines, string.format("Type: %s", tostring(entry.itemType)))
     appendLine(lines, string.format("Tier: %s", tostring(entry.tier)))
-    appendLine(lines, string.format("Matched recipes: %d", tonumber(entry.matchedRecipeCount or 0) or 0))
-    appendLine(lines, "Producers: " .. joinProducerNames(entry.itemIndustryRefs or {}))
+    appendWrappedDetailLine(lines, "Producers: " .. joinProducerNames(entry.itemIndustryRefs or {}), 84, "           ")
 
-    for _, source in ipairs(entry.sourceSchematics or {}) do
+    local source = entry.sourceSchematic
+    if source ~= nil then
         if (source.schematicName == nil or source.schematicName == "") and source.schematicId ~= nil then
             local schematicItem = getItemYielded(source.schematicId)
             source.schematicName = displayName(schematicItem)
         end
-        appendLine(lines, string.format(
-            "source schematic: %s (%s) x%s",
+        appendWrappedDetailLine(lines, string.format(
+            "Schematic: %s (%s) x%s",
             source.schematicName or "Unknown schematic",
             tostring(source.schematicId or ""),
             tostring(source.quantity or 0)
-        ))
-    end
-    if #(entry.sourceSchematics or {}) == 0 and tonumber(entry.sourceCount or 0) > 0 then
-        appendLine(lines, string.format("source schematics: %d cached", tonumber(entry.sourceCount or 0) or 0))
+        ), 84, "           ")
     end
 
-    for _, match in ipairs(entry.matches or {}) do
-        appendLine(lines, string.format("Recipe %d", match.index))
-        appendLine(lines, "  Producers: " .. joinProducerNames(match.producerRefs or {}))
+    local match = entry.match
+    if match ~= nil then
+        appendLine(lines, "Recipe")
         for _, schematic in ipairs(match.schematicMatches or {}) do
             appendLine(lines, string.format("  schematic %s (%s) x%s", schematic.name, tostring(schematic.id), tostring(schematic.quantity)))
         end
         for _, product in ipairs(match.productMatches or {}) do
             appendLine(lines, string.format("  product match %s (%s) x%s", product.name, tostring(product.id), tostring(product.quantity)))
-            for _, source in ipairs(product.schematics or {}) do
+            local productSource = product.sourceSchematic
+            if productSource ~= nil then
                 appendLine(lines, string.format(
                     "    via schematic %s (%s) x%s",
-                    source.schematicName or "Unknown schematic",
-                    tostring(source.schematicId or ""),
-                    tostring(source.quantity or 0)
+                    productSource.schematicName or "Unknown schematic",
+                    tostring(productSource.schematicId or ""),
+                    tostring(productSource.quantity or 0)
                 ))
             end
         end
@@ -1075,6 +1341,7 @@ function renderDetail(itemId, page)
         tostring(DETAIL_LINES_PER_PAGE),
         tostring(count),
         safeText(entry.name),
+        "lines",
     }
 
     local startIndex = currentDetailPage * DETAIL_LINES_PER_PAGE + 1
@@ -1102,8 +1369,8 @@ function buildBucketSummary()
         ["Honeycomb"] = 0,
         ["Chemical"] = 0,
         ["Glass Furnace"] = 0,
-        ["Mixed"] = 0,
-        ["Unknown"] = 0,
+        ["Refiner"] = 0,
+        ["Recycler"] = 0,
     }
 
     for _, entry in ipairs(scanResults or {}) do
@@ -1116,14 +1383,8 @@ function buildBucketSummary()
     end
 
     local parts = {}
-    for _, branch in ipairs({ "Honeycomb", "Chemical", "Glass Furnace" }) do
+    for _, branch in ipairs({ "Honeycomb", "Chemical", "Glass Furnace", "Refiner", "Recycler" }) do
         parts[#parts + 1] = branch .. "=" .. tostring(counts[branch] or 0)
-    end
-    if (counts["Mixed"] or 0) > 0 then
-        parts[#parts + 1] = "Mixed=" .. tostring(counts["Mixed"])
-    end
-    if (counts["Unknown"] or 0) > 0 then
-        parts[#parts + 1] = "Unknown=" .. tostring(counts["Unknown"])
     end
 
     return table.concat(parts, " ")

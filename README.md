@@ -1,10 +1,12 @@
 # DU Hierarchy Lister
 
-This is a Dual Universe programming board script that builds a browseable list of products for three industry families:
+This is a Dual Universe programming board script that builds a browseable list of products for five industry families:
 
 - Honeycomb
 - Chemical
 - Glass Furnace
+- Refiner
+- Recycler
 
 It is meant to answer a simple question:
 
@@ -39,8 +41,8 @@ On startup, the board:
    - `Honeycomb`
    - `Chemical`
    - `Glass Furnace`
-   - `Mixed`
-   - `Unknown`
+   - `Refiner`
+   - `Recycler`
 7. Stores a compact cache in the linked databank, if one is available.
 8. Shows the list on the linked screen.
 
@@ -65,7 +67,7 @@ That means:
 Cache behaviour is managed by the `HierarchyCache` class in `library_onStart.lua`. The default cache key prefix and version are configured in `unit_onStart.lua` and passed to the class constructor:
 
 - Cache key prefix: `hierarchy_scan_cache_v1`
-- Cache version: `1`
+- Cache version: `7`
 
 The key prefix is used to store a meta record (`<prefix>:meta`) and one or more data chunks (`<prefix>:chunk:N`). If the version in the meta record does not match the configured version, the cache is treated as a miss and a fresh scan is performed.
 
@@ -79,7 +81,15 @@ Link these to the programming board:
 - a core
 - optionally a databank for caching
 
-The script can also detect linked industry devices, but the main scan does not depend on those links for product discovery.
+The script can also detect linked industry devices for these five kinds:
+
+- Honeycomb
+- Chemical
+- Glass Furnace
+- Refiner
+- Recycler
+
+The main scan does not depend on those links for product discovery.
 
 ## Screen Controls
 
@@ -110,25 +120,18 @@ The detail page focuses on practical information:
 - item ID
 - type
 - tier
-- matched recipe count
 - producer machines
-- source schematics
-- per-recipe producer and ingredient/product lines
+- source schematic
+- recipe ingredient/product lines
 
 The goal is to make it easier to verify why a product was placed in a certain industry bucket.
-
-## What "Matched" Means
-
-`Matched recipes` means:
-
-How many actual recipes for that item were found that connect back to the scanned schematic/product path and expose relevant producer machines.
 
 ## Known Limits
 
 - The first live scan can still take a while.
 - Cached entries are compact on purpose, so some detail data is rebuilt when you open an item.
-- The script only targets the current three industry families listed above.
-- Anything DU returns as unclear or incomplete may end up in `Unknown` or `Mixed`.
+- The script only targets the current five industry families listed above.
+- The script expects products to resolve to one of the five supported industry families above.
 
 ## Files
 
