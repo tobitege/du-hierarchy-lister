@@ -62,11 +62,6 @@ resultByItemId = {}
 relevantSchematics = {}
 relevantSchematicList = {}
 schematicProductsByItemId = {}
-productRecipeDataByItemId = {}
-producerInfoById = {}
-itemByIdCache = {}
-cacheSourceCodeById = {}
-cacheSchematicIdByCode = {}
 remainingRelevantProductIds = {}
 remainingRelevantItemCount = 0
 firstRelevantSchematicId = nil
@@ -92,85 +87,26 @@ function bumpYield()
     end
 end
 
-function yieldFrame()
-    local runningCo, isMain = coroutine.running()
-    if runningCo ~= nil and not isMain then
-        coroutine.yield()
-    end
-end
-
-function yieldFrames(count)
-    local total = math.max(1, tonumber(count or 1) or 1)
-    for _ = 1, total do
-        yieldFrame()
-    end
-end
-
-function clearDatabankKeySlow(key)
-    databank.clearValue(key)
-    yieldFrames(CACHE_WRITE_FRAME_DELAY)
-end
-
-function writeDatabankStringVerified(label, key, value)
-    yieldFrames(CACHE_WRITE_FRAME_DELAY)
-    databank.setStringValue(key, value)
-    yieldFrames(CACHE_WRITE_FRAME_DELAY)
-    local storedValue = databank.getStringValue(key)
-    yieldFrames(CACHE_WRITE_FRAME_DELAY)
-    if tostring(storedValue or "") ~= tostring(value or "") then
-        system.print("cache write verify failed: " .. tostring(label))
-        return false
-    end
-    return true
-end
+cache = HierarchyCache.new({
+    cacheKey            = CACHE_KEY,
+    cacheVersion        = CACHE_VERSION,
+    chunkLimit          = CACHE_CHUNK_LIMIT,
+    writeFrameDelay     = CACHE_WRITE_FRAME_DELAY,
+    databank            = databank,
+    cooperativeYieldFn  = bumpYield,
+    frameYieldFn        = yieldFrame,
+})
 
 function getItemYielded(itemId)
-    if itemByIdCache[itemId] ~= nil then
-        return itemByIdCache[itemId]
-    end
-    local item = system.getItem(itemId)
-    itemByIdCache[itemId] = item
-    bumpYield()
-    return item
+    return cache:getItem(itemId)
 end
 
 function getRecipesYielded(itemId)
-    local recipes = system.getRecipes(itemId) or {}
-    bumpYield()
-    return recipes
-end
-
-function sortedKeys(t)
-    local keys = {}
-    for key in pairs(t or {}) do
-        keys[#keys + 1] = key
-        if #keys % BATCH == 0 then
-            bumpYield()
-        end
-    end
-    table.sort(keys, function(a, b)
-        return tostring(a) < tostring(b)
-    end)
-    return keys
-end
-
-function shallowValue(value)
-    local valueType = type(value)
-    if valueType ~= "table" then
-        return tostring(value)
-    end
-
-    local keys = sortedKeys(value)
-    local parts = {}
-    for i = 1, math.min(5, #keys) do
-        local key = keys[i]
-        parts[#parts + 1] = tostring(key) .. ":" .. type(value[key])
-    end
-    return string.format("{count=%d %s}", #keys, table.concat(parts, ", "))
+    return cache:getRecipes(itemId)
 end
 
 function hasDatabank()
-    return databank ~= nil
+    return cache:hasDatabank()
 end
 
 function walkTree(itemId, visited, callback, stopState)
@@ -207,10 +143,10 @@ end
 function summarizeTopLevel(value)
     local scalarLines = {}
     local tableLines = {}
-    for _, key in ipairs(sortedKeys(value)) do
+    for _, key in ipairs(sortedKeys(value, bumpYield, BATCH)) do
         local childValue = value[key]
         if type(childValue) == "table" then
-            tableLines[#tableLines + 1] = tostring(key) .. "=" .. shallowValue(childValue)
+            tableLines[#tableLines + 1] = tostring(key) .. "=" .. shallowValue(childValue, bumpYield, BATCH)
         else
             scalarLines[#scalarLines + 1] = tostring(key) .. "=" .. tostring(childValue)
         end
@@ -222,12 +158,12 @@ function collectTopLevelTermData(value, term)
     local hits = {}
     local refs = {}
     local seenRefs = {}
-    for _, key in ipairs(sortedKeys(value)) do
+    for _, key in ipairs(sortedKeys(value, bumpYield, BATCH)) do
         local childValue = value[key]
         local keyText = tostring(key)
         local lowerKey = keyText:lower()
         if lowerKey:find(term, 1, true) then
-            hits[#hits + 1] = keyText .. "=" .. shallowValue(childValue)
+            hits[#hits + 1] = keyText .. "=" .. shallowValue(childValue, bumpYield, BATCH)
             if type(childValue) == "table" then
                 collectRefsFromNode(childValue, keyText, refs, seenRefs, 0, {})
             end
@@ -248,14 +184,14 @@ function collectTermHits(value, path, hits, depth, visited, terms)
     end
     visited[value] = true
 
-    for _, key in ipairs(sortedKeys(value)) do
+    for _, key in ipairs(sortedKeys(value, bumpYield, BATCH)) do
         local childValue = value[key]
         local keyText = tostring(key)
         local childPath = path ~= "" and (path .. "." .. keyText) or keyText
         local lowerPath = childPath:lower()
 
         if matchesAnyTerm(lowerPath, terms) then
-            hits[#hits + 1] = childPath .. "=" .. shallowValue(childValue)
+            hits[#hits + 1] = childPath .. "=" .. shallowValue(childValue, bumpYield, BATCH)
         elseif type(childValue) == "string" and matchesAnyTerm(childValue, terms) then
             hits[#hits + 1] = childPath .. "=" .. childValue
         end
@@ -306,7 +242,7 @@ function collectRefsFromNode(node, sourcePath, refs, seenRefs, depth, visited)
 
     addItemRef(refs, seenRefs, node, sourcePath)
 
-    for _, key in ipairs(sortedKeys(node)) do
+    for _, key in ipairs(sortedKeys(node, bumpYield, BATCH)) do
         local childValue = node[key]
         if type(childValue) == "table" then
             collectRefsFromNode(childValue, sourcePath, refs, seenRefs, depth + 1, visited)
@@ -326,7 +262,7 @@ function collectRefsForTerm(value, path, refs, depth, visited, term, seenRefs)
     end
     visited[value] = true
 
-    for _, key in ipairs(sortedKeys(value)) do
+    for _, key in ipairs(sortedKeys(value, bumpYield, BATCH)) do
         local childValue = value[key]
         local keyText = tostring(key)
         local childPath = path ~= "" and (path .. "." .. keyText) or keyText
@@ -415,100 +351,21 @@ function collectFlatIdRefs(idList, sourcePath)
     return refs
 end
 
-function classifyProducerBucket(producerRef)
-    local lowerName = tostring(producerRef and producerRef.name or ""):lower()
-    if lowerName:find("glass furnace", 1, true) then
-        return "Glass Furnace"
-    end
-    if lowerName:find("chemical industry", 1, true) then
-        return "Chemical"
-    end
-    if lowerName:find("honeycomb", 1, true) then
-        return "Honeycomb"
-    end
-    return nil
-end
-
-function bucketFromOrderedList(orderedBuckets)
-    if #orderedBuckets == 0 then
-        return "Unknown"
-    end
-    if #orderedBuckets == 1 then
-        return orderedBuckets[1]
-    end
-    return "Mixed"
-end
-
 function getProducerInfo(producerId)
-    local cached = producerInfoById[producerId]
-    if cached ~= nil then
-        return cached
-    end
-
-    local producerItem = getItemYielded(producerId)
-    cached = {
-        id = producerId,
-        name = displayName(producerItem),
-        tier = producerItem and producerItem.tier or 0,
-        classId = producerItem and producerItem.classId or 0,
-    }
-    cached.bucket = classifyProducerBucket(cached)
-    producerInfoById[producerId] = cached
-    return cached
+    return cache:getProducerInfo(producerId)
 end
 
 function buildProductRecipeData(productId, recipes)
-    recipes = recipes or {}
-    local producerRefs = {}
-    local seenProducerIds = {}
-    local seenBuckets = {}
-    local orderedBuckets = {}
-
-    for _, recipe in ipairs(recipes) do
-        for _, rawProducerId in ipairs(recipe.producers or {}) do
-            local producerId = tonumber(rawProducerId or 0)
-            if producerId and producerId > 0 and not seenProducerIds[producerId] then
-                seenProducerIds[producerId] = true
-                local producerInfo = getProducerInfo(producerId)
-                producerRefs[#producerRefs + 1] = {
-                    id = producerInfo.id,
-                    name = producerInfo.name,
-                    quantity = 0,
-                    sourcePath = "producers",
-                    tier = producerInfo.tier,
-                    classId = producerInfo.classId,
-                }
-                if producerInfo.bucket and not seenBuckets[producerInfo.bucket] then
-                    seenBuckets[producerInfo.bucket] = true
-                    orderedBuckets[#orderedBuckets + 1] = producerInfo.bucket
-                end
-            end
-            bumpYield()
-        end
-    end
-
-    return {
-        recipeCount = #recipes,
-        producerRefs = producerRefs,
-        bucket = bucketFromOrderedList(orderedBuckets),
-    }
+    return cache:buildProductRecipeData(productId, recipes)
 end
 
 function collectProducerRefs(recipe)
-    local recipeData = buildProductRecipeData(0, { recipe })
+    local recipeData = cache:buildProductRecipeData(0, { recipe })
     return recipeData.producerRefs or {}
 end
 
 function getProductRecipeData(productId, knownRecipes)
-    local cached = productRecipeDataByItemId[productId]
-    if cached ~= nil then
-        return cached
-    end
-
-    local recipes = knownRecipes or getRecipesYielded(productId)
-    cached = buildProductRecipeData(productId, recipes)
-    productRecipeDataByItemId[productId] = cached
-    return cached
+    return cache:getProductRecipeData(productId, knownRecipes)
 end
 
 function dumpLuaValue(path, value, depth, visited, lines, maxDepth, maxLines)
@@ -530,14 +387,14 @@ function dumpLuaValue(path, value, depth, visited, lines, maxDepth, maxLines)
     end
 
     if depth >= maxDepth then
-        pushDumpLine(lines, path .. " = " .. shallowValue(value), maxLines)
+        pushDumpLine(lines, path .. " = " .. shallowValue(value, bumpYield, BATCH), maxLines)
         bumpYield()
         return
     end
 
     visited[value] = true
     pushDumpLine(lines, path .. " = {", maxLines)
-    for _, key in ipairs(sortedKeys(value)) do
+    for _, key in ipairs(sortedKeys(value, bumpYield, BATCH)) do
         if #lines >= maxLines then
             break
         end
@@ -740,8 +597,7 @@ function collectRelevantSchematics()
     relevantSchematics = {}
     relevantSchematicList = {}
     schematicProductsByItemId = {}
-    productRecipeDataByItemId = {}
-    producerInfoById = {}
+    cache:resetRuntime()
     remainingRelevantProductIds = {}
     remainingRelevantItemCount = 0
     firstRelevantSchematicId = nil
@@ -801,10 +657,12 @@ function collectRelevantSchematics()
         bumpYield()
     end
 
+    announceWorkPhase("Organize schematic scan data")
     table.sort(relevantSchematicList, function(a, b)
         return a.name:lower() < b.name:lower()
     end)
 
+    announceWorkPhase("Index scanned products")
     for productId in pairs(schematicProductsByItemId) do
         remainingRelevantProductIds[productId] = true
         remainingRelevantItemCount = remainingRelevantItemCount + 1
@@ -964,6 +822,11 @@ function renderStatus(message)
     scanSummary = message or scanSummary
     lastOutput = ""
     screen.setScriptInput("status;" .. safeText(scanSummary) .. ";0;0")
+end
+
+function announceWorkPhase(message)
+    renderStatus(message)
+    yieldFrame()
 end
 
 function renderIdle(message)
@@ -1266,151 +1129,6 @@ function buildBucketSummary()
     return table.concat(parts, " ")
 end
 
-function makeCachedEntry(entry)
-    return {
-        id = entry.id,
-        branch = entry.branch,
-        sourceSchematics = entry.sourceSchematics or {},
-    }
-end
-
-function buildSchematicCodeMaps()
-    local codeById = {}
-    local idByCode = {}
-    for index, schematic in ipairs(relevantSchematicList or {}) do
-        local schematicId = tonumber(schematic and schematic.id or 0) or 0
-        if schematicId > 0 then
-            local code = encodeIndexCode(index)
-            codeById[schematicId] = code
-            idByCode[code] = schematicId
-        end
-    end
-    return codeById, idByCode
-end
-
-function makeCompactCachedLine(entry)
-    local fields = {
-        tostring(entry.id or 0),
-        encodeBucket(entry.branch),
-        encodeSourceSchematics(entry.sourceSchematics or {}, cacheSourceCodeById),
-    }
-    return table.concat(fields, "|")
-end
-
-function parseCompactCachedLine(line)
-    local fields = splitCacheLine(tostring(line or ""))
-    local entryId = tonumber(fields[1] or 0)
-    if not entryId or entryId <= 0 then
-        return nil
-    end
-
-    return {
-        id = entryId,
-        name = "",
-        branch = decodeBucket(fields[2]),
-        itemType = "",
-        tier = "",
-        size = "",
-        displayClassId = 0,
-        childCount = 0,
-        recipeCount = 0,
-        matchedRecipeCount = 0,
-        sourceCount = 0,
-        itemIndustryHits = {},
-        itemProductHits = {},
-        itemSchematicHits = {},
-        itemIndustryRefs = {},
-        itemProductRefs = {},
-        sourceSchematics = decodeSourceSchematics(fields[3], cacheSchematicIdByCode),
-        matches = {},
-        detailLoaded = false,
-    }
-end
-
-function getCacheMetaKey()
-    return CACHE_KEY .. ":meta"
-end
-
-function getCacheChunkKey(index)
-    return CACHE_KEY .. ":chunk:" .. tostring(index)
-end
-
-function getExistingCacheKeys()
-    local keys = {}
-    local keyList = databank.getKeyList() or {}
-    local prefix = CACHE_KEY .. ":"
-    for _, key in ipairs(keyList) do
-        local keyText = tostring(key or "")
-        if keyText == CACHE_KEY or string.sub(keyText, 1, string.len(prefix)) == prefix then
-            keys[#keys + 1] = keyText
-        end
-        bumpYield()
-    end
-    table.sort(keys)
-    return keys
-end
-
-function clearExistingCacheData()
-    if not hasDatabank() then
-        return 0
-    end
-
-    local keys = getExistingCacheKeys()
-    local totalOps = #keys
-    renderProgress("Clear cache", 0, totalOps)
-    for index, key in ipairs(keys) do
-        clearDatabankKeySlow(key)
-        renderProgress("Clear cache", index, totalOps)
-    end
-
-    return #keys
-end
-
-function buildCompactCachePayload(maxChunkLength)
-    local chunkLimit = tonumber(maxChunkLength or 12000) or 12000
-    local chunks = {}
-    local currentChunkLines = {}
-    local currentChunkLength = 0
-    cacheSourceCodeById, cacheSchematicIdByCode = buildSchematicCodeMaps()
-
-    for _, entry in ipairs(scanResults) do
-        local line = makeCompactCachedLine(makeCachedEntry(entry))
-        local extraLength = #line
-        if currentChunkLength > 0 then
-            extraLength = extraLength + 1
-        end
-
-        if currentChunkLength > 0 and currentChunkLength + extraLength > chunkLimit then
-            chunks[#chunks + 1] = table.concat(currentChunkLines, "\n")
-            currentChunkLines = {}
-            currentChunkLength = 0
-        end
-
-        currentChunkLines[#currentChunkLines + 1] = line
-        currentChunkLength = currentChunkLength + #line
-        if #currentChunkLines > 1 then
-            currentChunkLength = currentChunkLength + 1
-        end
-        bumpYield()
-    end
-
-    if #currentChunkLines > 0 then
-        chunks[#chunks + 1] = table.concat(currentChunkLines, "\n")
-    end
-
-    local meta = {
-        format = "compact_v3",
-        version = CACHE_VERSION,
-        generatedAt = system.getUtcTime(),
-        scanSummary = scanSummary,
-        schematicCount = #relevantSchematicList,
-        resultCount = #scanResults,
-        chunkCount = #chunks,
-        schematicMap = encodeSchematicMap(cacheSchematicIdByCode),
-    }
-    return meta, chunks
-end
-
 function saveCacheToDatabank()
     if tonumber(MAX_PRODUCTS_TO_RESOLVE or 0) > 0 then
         return false
@@ -1419,19 +1137,20 @@ function saveCacheToDatabank()
         return false
     end
 
-    local meta, chunks = buildCompactCachePayload(CACHE_CHUNK_LIMIT)
-    clearExistingCacheData()
+    announceWorkPhase("Prepare cache data")
+    local meta, chunks = cache:buildCompactCachePayload(scanResults, relevantSchematicList, scanSummary)
+    cache:clearExistingCacheData()
     renderProgress("Save cache", 0, #chunks)
     for index, chunk in ipairs(chunks or {}) do
         renderProgress("Save cache", index, #chunks)
-        if not writeDatabankStringVerified("chunk " .. tostring(index), getCacheChunkKey(index), chunk) then
+        if not cache:writeDatabankStringVerified("chunk " .. tostring(index), cache:getCacheChunkKey(index), chunk) then
             renderStatus("Cache write failed at chunk " .. tostring(index))
             return false
         end
     end
-    if not writeDatabankStringVerified("meta", getCacheMetaKey(), buildCacheMetaString(meta)) then
+    if not cache:writeDatabankStringVerified("meta", cache:getCacheMetaKey(), cache:buildCacheMetaString(meta)) then
         renderStatus("Cache write failed at meta")
-        clearDatabankKeySlow(getCacheMetaKey())
+        cache:clearDatabankKeySlow(cache:getCacheMetaKey())
         return false
     end
     system.print(string.format("cache saved: chunks=%d results=%d", #chunks, #scanResults))
@@ -1446,31 +1165,15 @@ function loadCacheFromDatabank()
         return false
     end
 
-    local meta = parseCacheMetaString(databank.getStringValue(getCacheMetaKey()))
-    if type(meta) == "table" then
-        scanResults = {}
-        resultByItemId = {}
-        cacheSchematicIdByCode = decodeSchematicMap(meta.schematicMap or "")
-        local chunkCount = tonumber(meta.chunkCount or 0) or 0
-        renderProgress("Load cache", 0, chunkCount)
-        for index = 1, chunkCount do
-            renderProgress("Load cache", index, chunkCount)
-            local chunk = databank.getStringValue(getCacheChunkKey(index))
-            for line in tostring(chunk or ""):gmatch("[^\n]+") do
-                local entry = parseCompactCachedLine(line)
-                if entry then
-                    scanResults[#scanResults + 1] = entry
-                    resultByItemId[entry.id] = entry
-                end
-                bumpYield()
-            end
-        end
-
+    local result = cache:loadScanResults()
+    if result then
+        scanResults = result.scanResults
+        resultByItemId = result.resultByItemId
         relevantSchematicList = {}
         relevantSchematics = {}
-        scanSummary = tostring(meta.scanSummary or "")
+        scanSummary = result.scanSummary
         if scanSummary == "" then
-            scanSummary = string.format("schematics=%d products=%d", tonumber(meta.schematicCount or 0) or 0, #scanResults)
+            scanSummary = string.format("schematics=%d products=%d", result.schematicCount or 0, #scanResults)
         end
         scanSummary = scanSummary .. " [cached]"
         selectedItemId = nil
@@ -1507,8 +1210,10 @@ function _scanCoroutine()
     renderProgress("Resolve products", 0, 0)
     buildResolvedProductResults()
 
+    announceWorkPhase("Organize resolved products")
     sortScanResults()
 
+    announceWorkPhase("Build result summary")
     if tonumber(MAX_PRODUCTS_TO_RESOLVE or 0) > 0 then
         scanSummary = string.format(
             "schematics=%d products=%d testLimit=%d %s",

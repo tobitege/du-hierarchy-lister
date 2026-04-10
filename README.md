@@ -44,6 +44,8 @@ On startup, the board:
 7. Stores a compact cache in the linked databank, if one is available.
 8. Shows the list on the linked screen.
 
+During longer scans, the screen may briefly show intermediate status messages such as organizing scanned data, indexing products, building the result summary, or preparing cache data. Those messages indicate that the script is still working between the main scan phases.
+
 ## Why It Scans
 
 The script does not rely on a hardcoded item list.
@@ -60,9 +62,12 @@ That means:
 - later runs are much faster
 - the `Rescan` button forces a fresh scan and refreshes the cache
 
-The current cache key is stored in the Lua code as:
+Cache behaviour is managed by the `HierarchyCache` class in `library_onStart.lua`. The default cache key prefix and version are configured in `unit_onStart.lua` and passed to the class constructor:
 
-- `hierarchy_scan_cache_v7`
+- Cache key prefix: `hierarchy_scan_cache_v1`
+- Cache version: `1`
+
+The key prefix is used to store a meta record (`<prefix>:meta`) and one or more data chunks (`<prefix>:chunk:N`). If the version in the meta record does not match the configured version, the cache is treated as a miss and a fresh scan is performed.
 
 If you wipe the databank, the script simply rebuilds the cache on the next run.
 
